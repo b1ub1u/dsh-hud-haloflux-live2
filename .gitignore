@@ -1,0 +1,17 @@
+# 运行产物 / runtime artifacts
+dsh-hud/shots/
+dsh-hud/.external.json
+dsh-hud/.media.json
+dsh-hud/server.log
+dsh-hud/wallpaper-screen.log
+*.bak
+
+# 依赖与缓存
+node_modules/
+.DS_Store
+Thumbs.db
+
+# 编辑器
+.vscode/
+.idea/
+*.swp

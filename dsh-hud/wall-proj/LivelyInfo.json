@@ -1,0 +1,13 @@
+{
+  "AppVersion": "2.2.1.0",
+  "Title": "HALOFLUX · DSH LIVE",
+  "Thumbnail": "",
+  "Preview": "",
+  "Desc": "Live HALOFLUX visualization driven by DeepSeek Harness session activity. Needs dsh-hud on 127.0.0.1:7788.",
+  "Author": "dsh-hud",
+  "License": "",
+  "Contact": "",
+  "Type": 1,
+  "Arguments": null,
+  "FileName": "index.html"
+}

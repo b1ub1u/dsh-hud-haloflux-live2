@@ -1,0 +1,8 @@
+{
+  "title": "HALOFLUX · DSH LIVE",
+  "type": "web",
+  "file": "index.html",
+  "tags": ["Visualization"],
+  "contentrating": "Everyone",
+  "description": "Live HALOFLUX visualization driven by DeepSeek Harness session activity. Requires the local dsh-hud server on 127.0.0.1:7788."
+}
