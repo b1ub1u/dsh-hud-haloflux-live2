@@ -5,6 +5,10 @@ import { execFile } from 'node:child_process';
 import { join, extname, resolve, normalize } from 'node:path';
 import { homedir } from 'node:os';
 import zlib from 'node:zlib';
+import { createMiniMaxSource } from './minimax-source.mjs';
+import { createWorkBuddySource } from './workbuddy-source.mjs';
+import { createClaudeSource } from './claude-source.mjs';
+import { createDoubaoSource } from './doubao-source.mjs';
 
 const HOST = '127.0.0.1';
 const PORT = Number(process.env.HUD_PORT || 7788);
@@ -13,6 +17,18 @@ const STATIC_DIR = join(ROOT, 'haloflux');
 const SESSIONS = join(homedir(), '.dsh', 'sessions');
 const POLL_MS = 500;
 const ACTIVE_WINDOW = 15 * 60 * 1000;
+
+/* second data source: MiniMax Code (local runtime store) */
+const mmSource = createMiniMaxSource();
+
+/* third data source: WorkBuddy (append-only session JSONL + sqlite metadata) */
+const wbSource = createWorkBuddySource();
+
+/* fourth data source: Claude Code (append-only transcript JSONL, no metadata store) */
+const ccSource = createClaudeSource();
+
+/* fifth data source: Doubao PC (closed client; inferred from external.ps1 UIA snapshot) */
+const dbSource = createDoubaoSource();
 
 const MIME = {
   '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8',
@@ -84,6 +100,9 @@ const toolLog = [];         // global recent tool calls: {t,name,ms,ok,ws,sid}
 function newSess(entry) {
   return {
     key: entry.key, ws: entry.ws, file: entry.file,
+    id: entry.id || entry.key.replace('session-', '').slice(0, 8),
+    source: entry.source || 'dsh',
+    agent: entry.agent || 'DeepSeek Harness',
     consumed: 0, tail: '', ready: false,
     title: '', model: '', events: 0, tools: 0, errors: 0, turns: 0, steps: 0, jobs: 0,
     turn: 0, step: 0, lastType: '', lastTime: 0, startedAt: 0,
@@ -108,10 +127,16 @@ function onEvent(s, ev) {
   s.events++; s.lastType = t; s.lastTime = time;
   s.rateTimes.push(time);
   const cwd = ev.cwd || d.cwd;
-  if (t === 'session' && cwd) { s.cwd = cwd; s.ws = String(cwd).split(/[\\/]/).filter(Boolean).pop() || s.ws; }
+  // the source's own workspace label wins (WorkBuddy formats timestamp folders, DSH decodes
+  // the encoded folder name); the raw path is only a fallback for sources that have none.
+  if (t === 'session' && cwd) {
+    s.cwd = cwd;
+    if (!s.ws) s.ws = String(cwd).split(/[\\/]/).filter(Boolean).pop() || s.ws;
+  }
   if (t === 'session') s.startedAt = ev.createdAt || d.createdAt || s.startedAt || 0;
   if (t === 'session/title' && d.title) s.title = d.title;
   if (t === 'request/header') s.model = d?.header?.config?.model || s.model;
+  if (t === 'assistant/message' && d.model) s.model = d.model;
   if (t === 'turn/start') { s.newTurns++; s.turn = d.turn || s.turn; s.turns = Math.max(s.turns, s.turn); }
   if (t === 'step/start') { s.step = d.step || s.step; s.steps++; }
   if (t === 'job/registered') s.jobs++;
@@ -127,7 +152,7 @@ function onEvent(s, ev) {
     const isErr = !!(d.isError || d?.message?.isError);
     if (isErr) { s.errors++; s.newErrors++; }
     if (p) {
-      const item = { t: p.t0, name: p.name, args: p.args, ms: Math.max(0, time - p.t0), ok: !isErr, ws: s.ws, sid: s.key.replace('session-', '').slice(0, 8) };
+      const item = { t: p.t0, name: p.name, args: p.args, ms: Math.max(0, time - p.t0), ok: !isErr, ws: s.ws, sid: s.id, source: s.source, agent: s.agent };
       s.feed.push(item);
       if (s.feed.length > 40) s.feed.splice(0, s.feed.length - 40);
       toolLog.push(item);
@@ -166,8 +191,21 @@ function updateSession(entry) {
 }
 
 /* ---------------- aggregate ---------------- */
-let lastBursts = { tools: 0, turns: 0, errors: 0 };
 const lastPushAt = { t: 0 };
+let lastBursts = { tools: 0, turns: 0, errors: 0 };
+
+/** Move the per-session deltas into the burst accumulator.
+ *  Only ever called from the poll loop, so an extra /state request can never
+ *  swallow a burst before it reaches the page. */
+function drainBursts() {
+  const b = { tools: 0, turns: 0, errors: 0 };
+  for (const s of sessions.values()) {
+    b.tools += s.newTools || 0; s.newTools = 0;
+    b.turns += s.newTurns || 0; s.newTurns = 0;
+    b.errors += s.newErrors || 0; s.newErrors = 0;
+  }
+  lastBursts = b;
+}
 
 function summarize(s) {
   const now = Date.now();
@@ -178,11 +216,17 @@ function summarize(s) {
   const pending = s.pending.size;
   let status = 'idle';
   if (s.lastType === 'tool/call' || pending) status = 'tool';
-  else if (['turn/start', 'step/start', 'assistant/message', 'tool/result'].includes(s.lastType)) status = 'thinking';
+  else if (['turn/start', 'step/start', 'assistant/message', 'tool/result', 'user/message'].includes(s.lastType)) {
+    // a finished turn leaves the last event on 'assistant/message' forever; after 3 quiet
+    // minutes the session is really waiting for input, not thinking
+    status = now - s.lastTime < 180000 ? 'thinking' : 'idle';
+  }
   let cur = null;
   for (const pp of s.pending.values()) if (!cur || pp.t0 > cur.t0) cur = pp;
   return {
-    id: s.key.replace('session-', '').slice(0, 8),
+    id: s.id,
+    source: s.source || 'dsh',
+    agent: s.agent || 'DeepSeek Harness',
     currentTool: cur ? { name: cur.name, args: cur.args, t0: cur.t0 } : null,
     jobsActive: s.jobs || 0,
     startedAt: s.startedAt || 0,
@@ -200,27 +244,54 @@ function aggregate() {
   const list = [...sessions.values()].filter(s => s.ready && now - s.lastTime < ACTIVE_WINDOW);
   list.sort((a, b) => b.lastTime - a.lastTime);
   const sums = list.map(summarize);
+
+  // bursts: drained once per poll cycle, never by a plain /state read
   const burst = { ...lastBursts };
-  lastBursts = { tools: 0, turns: 0, errors: 0 };
 
   const rate = sums.reduce((a, s) => a + s.rate, 0);
   const rateShort = list.reduce((a, s) => a + s.rateTimes.filter(t => t > now - 4000).length, 0);
   const feed = [];
-  for (const s of list) for (const f of s.feed) feed.push({ ...f, ws: s.ws, sid: s.key.replace('session-', '').slice(0, 8), title: s.title });
+  for (const s of list) for (const f of s.feed) feed.push({ ...f, ws: s.ws, sid: s.id, title: s.title, source: s.source, agent: s.agent });
   feed.sort((a, b) => b.t - a.t);
+
+  // per-source breakdown: DSH and MiniMax Code are driven side by side
+  const bySource = {};
+  const ensure = (k) => bySource[k] || (bySource[k] = { rate: 0, rateShort: 0, active: 0, tools: 0, events: 0, errors: 0 });
+  for (let i = 0; i < list.length; i++) {
+    const s = list[i], v = sums[i];
+    const b = ensure(v.source || 'dsh');
+    b.rate += v.rate;
+    b.rateShort += s.rateTimes.filter(t => t > now - 4000).length;
+    b.active += 1;
+    b.tools += v.tools;
+    b.events += v.events;
+    b.errors += v.errors;
+  }
+
+  // keep both sources on screen: top N of each, then re-sorted by recency
+  const bySrc = new Map();
+  for (const v of sums) {
+    const k = v.source || 'dsh';
+    if (!bySrc.has(k)) bySrc.set(k, []);
+    bySrc.get(k).push(v);
+  }
+  const picked = [];
+  for (const arr of bySrc.values()) picked.push(...arr.slice(0, 5));
+  picked.sort((a, b) => b.lastTime - a.lastTime);
 
   return {
     at: now,
     active: list.length,
     rate,
     rateShort,
+    bySource,
     totals: {
       events: list.reduce((a, s) => a + s.events, 0),
       tools: list.reduce((a, s) => a + s.tools, 0),
       errors: list.reduce((a, s) => a + s.errors, 0),
       activeTools: sums.reduce((a, s) => a + s.activeTools, 0),
     },
-    sessions: sums.slice(0, 8),
+    sessions: picked.slice(0, 10),
     feed: feed.slice(0, 12),
     toolLog: toolLog.slice(-160),
     bursts: burst,
@@ -259,6 +330,7 @@ function refreshMedia(action = 'status') {
 /* ---------------- external AI apps (ChatGPT via UIA, WorkBuddy via OCR) ---------------- */
 const EXTERNAL_PS = join(ROOT, 'dsh-hud', 'external.ps1');
 const EXTERNAL_TMP = join(ROOT, 'dsh-hud', '.external.json');
+dbSource.setSnapshotPath(EXTERNAL_TMP);
 let externalCache = { at: 0, data: { apps: [] } };
 let externalBusy = false;
 let externalPrevSnip = '';
@@ -325,13 +397,182 @@ function buildUsage() {
     const week = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
     const label = nextAt ? `${week[nextAt.getDay()]} ${String(nextAt.getHours()).padStart(2, '0')}:${String(nextAt.getMinutes()).padStart(2, '0')}` : '';
     return {
-      today: { tokens: tok(day), costCny: day.costCny || 0, hit: hitOf(day), calls: day.calls || 0, date: today },
+      today: {
+        tokens: tok(day), costCny: day.costCny || 0, hit: hitOf(day), calls: day.calls || 0, date: today,
+        input: day.input || 0, output: day.output || 0, cacheRead: day.cacheRead || 0, cacheWrite: day.cacheWrite || 0,
+      },
       sessions,
       balance: (d.balanceRef && d.balanceRef.total) || null,
       peak: { inPeak: !!active, remainMs: nextAt ? nextAt - now : 0, nextLabel: label },
       at: Date.now(),
     };
   } catch (e) { return { error: String(e.message || e) }; }
+}
+
+/* ---------------- MiniMax Code source ----------------
+   The MiniMax Code runtime appends to ~/.minimax/v2/sessions/**\/messages.jsonl while
+   a turn is running. We tail those logs and push the events into the same state
+   machine the DSH sessions use, so both harnesses drive one picture. */
+let mmBusy = false;
+let mmSeen = new Set();
+
+async function pollMiniMax() {
+  if (mmBusy) return;
+  mmBusy = true;
+  try {
+    const res = await mmSource.poll();
+    const seen = new Set();
+    for (const [key, entry] of res.sessions) {
+      seen.add(key);
+      let s = sessions.get(key);
+      if (!s) {
+        s = newSess({
+          key, ws: entry.meta.ws, file: entry.meta.file,
+          id: entry.meta.shortId, source: 'minimax', agent: entry.meta.agent,
+        });
+        s.ready = true;
+        sessions.set(key, s);
+      }
+      s.title = entry.meta.title || s.title;
+      s.model = entry.meta.model || s.model;
+      s.agent = entry.meta.agent || s.agent;
+      s.status = entry.meta.status || s.status;
+      if (entry.meta.createdAt) s.startedAt = entry.meta.createdAt;
+      for (const ev of entry.events) onEvent(s, ev);
+    }
+    // drop sessions whose folder disappeared
+    for (const k of mmSeen) if (!seen.has(k)) sessions.delete(k);
+    mmSeen = seen;
+  } catch (e) {
+    /* the MiniMax store is optional - never let it take the HUD down */
+  }
+  mmBusy = false;
+}
+
+/* ---------------- WorkBuddy source ----------------
+   WorkBuddy appends one JSON object per line to
+   ~/.workbuddy/projects/<encoded-cwd>/<sessionId>.jsonl while a turn is running, and keeps
+   title / status / model in ~/.workbuddy/workbuddy.db. The source normalizes both into the
+   same event vocabulary as DSH + MiniMax Code, so the three harnesses share this state machine. */
+let wbBusy = false;
+let wbSeen = new Set();
+
+async function pollWorkBuddy() {
+  if (wbBusy) return;
+  wbBusy = true;
+  try {
+    const res = await wbSource.poll();
+    const seen = new Set();
+    for (const [key, entry] of res.sessions) {
+      seen.add(key);
+      let s = sessions.get(key);
+      if (!s) {
+        s = newSess({
+          key, ws: entry.meta.ws, file: entry.meta.file,
+          id: entry.meta.shortId, source: 'workbuddy', agent: entry.meta.agent,
+        });
+        s.ready = true;
+        sessions.set(key, s);
+      }
+      s.title = entry.meta.title || s.title;
+      s.model = entry.meta.model || s.model;
+      s.agent = entry.meta.agent || s.agent;
+      if (entry.meta.createdAt) s.startedAt = entry.meta.createdAt;
+      for (const ev of entry.events) onEvent(s, ev);
+    }
+    // drop sessions whose log rotated out of the lookback window
+    for (const k of wbSeen) if (!seen.has(k)) {
+      const s = sessions.get(k);
+      if (s && (!s.lastTime || Date.now() - s.lastTime > ACTIVE_WINDOW)) sessions.delete(k);
+    }
+    wbSeen = seen;
+  } catch (e) {
+    /* WorkBuddy store is optional - never let it take the HUD down */
+  }
+  wbBusy = false;
+}
+
+/* ---------------- Claude Code source ----------------
+   Claude Code appends one JSON object per line to
+   <CLAUDE_CONFIG_DIR|~/.claude>/projects/<encoded-cwd>/<session-uuid>.jsonl.
+   No sqlite, no index: the transcript is the only truth (title = summary record or first prompt). */
+let ccBusy = false;
+let ccSeen = new Set();
+
+async function pollClaude() {
+  if (ccBusy) return;
+  ccBusy = true;
+  try {
+    const res = await ccSource.poll();
+    const seen = new Set();
+    for (const [key, entry] of res.sessions) {
+      seen.add(key);
+      let s = sessions.get(key);
+      if (!s) {
+        s = newSess({
+          key, ws: entry.meta.ws, file: entry.meta.file,
+          id: entry.meta.shortId, source: 'claude', agent: entry.meta.agent,
+        });
+        s.ready = true;
+        sessions.set(key, s);
+      }
+      s.title = entry.meta.title || s.title;
+      s.model = entry.meta.model || s.model;
+      s.agent = entry.meta.agent || s.agent;
+      for (const ev of entry.events) onEvent(s, ev);
+    }
+    for (const k of ccSeen) if (!seen.has(k)) {
+      const s = sessions.get(k);
+      if (s && (!s.lastTime || Date.now() - s.lastTime > ACTIVE_WINDOW)) sessions.delete(k);
+    }
+    ccSeen = seen;
+  } catch (e) {
+    /* Claude Code is optional (and probably not even installed) - never take the HUD down */
+  }
+  ccBusy = false;
+}
+
+/* ---------------- Doubao source ----------------
+   Doubao PC is a closed Electron chat client with no local transcript. We reuse
+   the UIA snapshot that external.ps1 already writes to .external.json and turn
+   window-state transitions (running / 执行中 / title-snippet changes) into the
+   same event vocabulary, so Doubao appears on the ring and event-rate chart
+   alongside DSH / MiniMax / WorkBuddy / Claude Code. */
+let dbBusy = false;
+let dbSeen = new Set();
+
+async function pollDoubao() {
+  if (dbBusy) return;
+  dbBusy = true;
+  try {
+    const res = await dbSource.poll();
+    const seen = new Set();
+    for (const [key, entry] of res.sessions) {
+      seen.add(key);
+      let s = sessions.get(key);
+      if (!s) {
+        s = newSess({
+          key, ws: entry.meta.ws, file: entry.meta.file,
+          id: entry.meta.shortId, source: 'doubao', agent: entry.meta.agent,
+        });
+        s.ready = true;
+        sessions.set(key, s);
+      }
+      s.title = entry.meta.title || s.title;
+      s.model = entry.meta.model || s.model;
+      s.agent = entry.meta.agent || s.agent;
+      if (entry.meta.createdAt) s.startedAt = entry.meta.createdAt;
+      for (const ev of entry.events) onEvent(s, ev);
+    }
+    for (const k of dbSeen) if (!seen.has(k)) {
+      const s = sessions.get(k);
+      if (s && (!s.lastTime || Date.now() - s.lastTime > ACTIVE_WINDOW)) sessions.delete(k);
+    }
+    dbSeen = seen;
+  } catch (e) {
+    /* Doubao is optional - never let it take the HUD down */
+  }
+  dbBusy = false;
 }
 
 /* ---------------- http ---------------- */
@@ -354,14 +595,46 @@ const server = createServer(async (req, res) => {
 
   if (p === '/stats') {
     const u = process.cpuUsage();
+    let mm = 0, wb = 0, cc = 0, db = 0;
+    for (const k of sessions.keys()) {
+      if (k.startsWith('mm:')) mm++;
+      else if (k.startsWith('wb:')) wb++;
+      else if (k.startsWith('cc:')) cc++;
+      else if (k.startsWith('db:')) db++;
+    }
     return sendJson(res, {
       cpuMs: (u.user + u.system) / 1000,
       uptimeMs: Math.round(process.uptime() * 1000),
       rssMB: Math.round(process.memoryUsage().rss / 1e6),
       sessions: sessions.size,
+      minimaxSessions: mm,
+      workbuddySessions: wb,
+      claudeSessions: cc,
+      doubaoSessions: db,
+      dshSessions: sessions.size - mm - wb - cc - db,
+      claudeRoot: ccSource.root(),
+      claudeStore: ccSource.onDisk(),
       toolLog: toolLog.length,
       clients: clients.size,
     });
+  }
+  if (p === '/sources') {
+    /* one row per harness: who is plugged in right now, and how busy */
+    const now = Date.now();
+    const out = {};
+    for (const s of sessions.values()) {
+      const k = s.source || 'dsh';
+      const o = out[k] || (out[k] = {
+        source: k, agent: s.agent || k, sessions: 0, active: 0,
+        rate: 0, events: 0, tools: 0, errors: 0, lastAt: 0,
+      });
+      o.sessions += 1;
+      o.events += s.events; o.tools += s.tools; o.errors += s.errors;
+      o.lastAt = Math.max(o.lastAt, s.lastTime || 0);
+      if (now - (s.lastTime || 0) < ACTIVE_WINDOW) o.active += 1;
+      o.rate += s.rateTimes.filter(t => t > now - 60000).length;
+    }
+    return sendJson(res, { at: now, activeWindowMs: ACTIVE_WINDOW, sources: Object.values(out) });
   }
   if (p === '/external') {
     lastPagePollAt = Date.now();
@@ -383,7 +656,13 @@ const server = createServer(async (req, res) => {
     const sid = url.searchParams.get('session') || '';
     let session = null;
     if (use.sessions) session = use.sessions.find(x => sid && x.id && x.id.includes(sid)) || use.sessions[0] || null;
-    return sendJson(res, { ...use, session });
+    let mm = null, wb = null, cc = null, db = null;
+    const midnight = new Date(); midnight.setHours(0, 0, 0, 0);
+    try { mm = await mmSource.usageSince(midnight.getTime()); } catch { /* the MiniMax store is optional */ }
+    try { wb = wbSource.usageSince(midnight.getTime()); } catch { /* the WorkBuddy store is optional */ }
+    try { cc = ccSource.usageSince(midnight.getTime()); } catch { /* the Claude Code store is optional */ }
+    try { db = await dbSource.usageSince(midnight.getTime()); } catch { /* Doubao has no local ledger */ }
+    return sendJson(res, { ...use, session, minimax: mm, workbuddy: wb, claude: cc, doubao: db });
   }
   if (p === '/state') {
     const b = Buffer.from(JSON.stringify(aggregate()));
@@ -435,6 +714,10 @@ const server = createServer(async (req, res) => {
 
 /* ---------------- poll loop ---------------- */
 function tick() {
+  pollMiniMax();                       // MiniMax Code sessions (async, never blocks the loop)
+  pollWorkBuddy();                     // WorkBuddy sessions (async, never blocks the loop)
+  pollClaude();                        // Claude Code transcripts (async, never blocks the loop)
+  pollDoubao();                        // Doubao PC window-state (async, never blocks the loop)
   const files = listSessionFiles();
   const now = Date.now();
   for (const entry of files) {
@@ -449,12 +732,17 @@ function tick() {
       updateSession(entry);
     } catch { /* skip */ }
   }
+  drainBursts();
   const payload = aggregate();
   const msg = `event: state\ndata: ${JSON.stringify(payload)}\n\n`;
   for (const c of clients) { try { c.write(msg); } catch { clients.delete(c); } }
 }
 
 tick();
+pollMiniMax();
+pollWorkBuddy();
+pollClaude();
+pollDoubao();
 setInterval(tick, POLL_MS);
 
 /* 看门狗：壁纸页面掉线时自动恢复
@@ -493,5 +781,7 @@ process.on('unhandledRejection', (e) => { console.error('[warn] unhandled reject
 server.listen(PORT, HOST, () => {
   console.log(`HUD live   http://${HOST}:${PORT}/`);
   console.log(`sessions   ${SESSIONS}`);
+  console.log(`claude     ${ccSource.root()} ${ccSource.onDisk() ? '(store found)' : '(no store yet - idle until Claude Code runs)'}`);
+  console.log(`doubao     UIA snapshot ${EXTERNAL_TMP} ${dbSource.onDisk() ? '(found)' : '(waiting for external.ps1)'}`);
   console.log(`static     ${STATIC_DIR}`);
 });

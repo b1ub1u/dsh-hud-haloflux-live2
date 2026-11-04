@@ -26,7 +26,8 @@
   });
   // ---- replace the demo branding with personal labels (license credit moved to the footer line) ----
   const brandH = document.querySelector('.brand h1');
-  if (brandH) brandH.textContent = 'DEEPSEEK HARNESS';
+  // four harnesses no longer fit on one line inside the brand cell - lockup it is
+  if (brandH) brandH.innerHTML = 'DSH × MINIMAX × DOUBAO<br>WORKBUDDY × CLAUDE CODE';
   const brandP = document.querySelector('.brand p');
   if (brandP) brandP.textContent = '大肥鱼 · 实时会话可视化';
   // 署名/许可：仓库的 README.md / NOTICE.md / LICENSE 已完整保留；
@@ -49,7 +50,7 @@
     'body,.app,.p,.p h3,.kpi .k,.kpi .v,.feed div,.code div,.ag,.routes,.chip,.ov,.ov.status .sm,.brand p,button,input{',
     "  font-family:'JetBrains Mono','MiSans','HarmonyOS Sans SC','Alibaba PuHuiTi 3.0',Consolas,monospace !important;",
     '}',
-    ".brand h1{font-family:'JetBrains Mono','MiSans',Consolas,monospace !important;letter-spacing:.10em !important}",
+    ".brand h1{font-family:'JetBrains Mono','MiSans',Consolas,monospace !important;letter-spacing:.10em !important;line-height:1.12 !important}",
     '.p h3,.kpi .k,#dsh-media .lbl{letter-spacing:.12em !important}',
   ].join('\n');
   document.head.appendChild(fontCss);
@@ -98,16 +99,25 @@
   function ingest(st) {
     if (!st) return;
     const at = st.at || Date.now();
-    H.samples.push({ t: at, v: st.rate || 0 });
+    const bs = st.bySource || {};
+    H.samples.push({
+      t: at, v: st.rate || 0,
+      d: (bs.dsh && bs.dsh.rate) || 0,            // DeepSeek Harness events / min
+      m: (bs.minimax && bs.minimax.rate) || 0,    // MiniMax Code events / min
+      w: (bs.workbuddy && bs.workbuddy.rate) || 0, // WorkBuddy events / min
+      c: (bs.claude && bs.claude.rate) || 0,      // Claude Code events / min
+      db: (bs.doubao && bs.doubao.rate) || 0,    // Doubao events / min
+    });
     while (H.samples.length && H.samples[0].t < at - WINDOW) H.samples.shift();
 
     for (const s of st.sessions || []) {
-      let a = H.sess.get(s.id);
-      if (!a) { a = []; H.sess.set(s.id, a); }
-      a.push({ t: at, v: s.rate || 0, title: s.title, ws: s.ws });
+      const sk = (s.source || 'dsh') + ':' + s.id;
+      let a = H.sess.get(sk);
+      if (!a) { a = []; H.sess.set(sk, a); }
+      a.push({ t: at, v: s.rate || 0, title: s.title, ws: s.ws, src: s.source });
       while (a.length && a[0].t < at - WINDOW) a.shift();
       // keep insertion order fresh
-      H.sess.delete(s.id); H.sess.set(s.id, a);
+      H.sess.delete(sk); H.sess.set(sk, a);
     }
 
     if (st.toolLog) H.tools = st.toolLog;
@@ -276,7 +286,7 @@
     'DEEPSEEK':     [232, 234, 240],
     // external
     'ChatGPT':      [116, 227, 172],   // 薄荷绿
-    'WorkBuddy':    [ 99, 179, 255],   // 天蓝
+    'WorkBuddy':    [ 14, 199, 168],   // 官方品牌绿（logo 渐变起点 #0EC7A8）
     'MiniMax Code': [186, 140, 255],   // 紫罗兰
     'MiniMax':      [186, 140, 255],
     'Doubao':       [255, 138, 176],   // 桃粉
@@ -285,6 +295,19 @@
     'Cursor':       [140, 200, 140],   // 草绿
   };
   const FALLBACK_COLORS = [[120, 200, 255], [255, 180, 120], [180, 255, 160], [255, 160, 220], [160, 180, 255]];
+  /* source identity: which harness produced the event
+     NOTE(2026-11): MiniMax Code 的官方 accent 是 #0094fc（blue_400，mcode-default 主题包
+     的 --border_accent，客户端配置里 colors.*.accent 均为 null 即走这个默认值）。
+     下面的紫罗兰是当前暂时选用的占位色，想换回官方色只改这两个常量即可。 */
+  const SRC_COLOR = { dsh: '#e8eaf0', minimax: '#ba8cff', workbuddy: '#0ec7a8', claude: '#d6a06e', doubao: '#ff8ab0' };
+  const SRC_LABEL = { dsh: 'DSH', minimax: 'MM', workbuddy: 'WB', claude: 'CC', doubao: 'DB' };
+  const SRC_RGB = { dsh: [232, 234, 240], minimax: [186, 140, 255], workbuddy: [14, 199, 168], claude: [214, 160, 110], doubao: [255, 138, 176] };
+  const SRC_ICON = { dsh: '#8fe3ff', minimax: '#ba8cff', workbuddy: '#2ee0c0', claude: '#d6a06e', doubao: '#ff9ec0' };
+  const SRC_TITLE = { minimax: 'MINIMAX CODE', workbuddy: 'WORKBUDDY', claude: 'CLAUDE CODE', doubao: 'DOUBAO' };
+  const srcColor = (s) => SRC_COLOR[s] || SRC_COLOR.dsh;
+  const srcLabel = (s) => SRC_LABEL[s] || 'DSH';
+  const srcRgb = (s) => SRC_RGB[s] || SRC_RGB.dsh;
+  const srcIcon = (s) => SRC_ICON[s] || SRC_ICON.dsh;
   function agentColor(name) {
     if (!name) return FALLBACK_COLORS[0];
     const key = String(name).trim();
@@ -370,16 +393,29 @@
 
   function humanVerb(name) {
     const n = String(name || '').toLowerCase();
-    if (/pwsh|bash|shell|terminal|cmd|node|python|npm|npx|pnpm|git|docker/.test(n)) return '运行命令';
+    // Bash / PowerShell / shell-ish runners (WorkBuddy uses PascalCase tool names)
+    if (/pwsh|powershell|bash|shell|terminal|cmd|node|python|npm|npx|pnpm|git|docker/.test(n)) return '运行命令';
+    if (/tool_search|toolsearch/.test(n)) return '查找工具';
+    if (/web_search|websearch|web_fetch|webfetch|search/.test(n)) return '联网查询';
+    if (/mcp_browser|browser_use/.test(n)) return '操作浏览器';
+    if (/mcp_invoke|defer_execute|deferexecute/.test(n)) return '调用集成';
     if (n === 'read') return '读取文件';
     if (n === 'write' || n === 'create_file') return '新建文件';
     if (n === 'edit' || n === 'apply_patch') return '修改文件';
     if (/grep|glob|find|^ls$/.test(n)) return '查找内容';
-    if (/web_search|web_fetch|search/.test(n)) return '联网查询';
-    if (/read_image|image/.test(n)) return '看图';
-    if (/ask_user_question/.test(n)) return '等你确认';
-    if (/job_|schedule/.test(n)) return '后台任务';
-    if (/subagent/.test(n)) return '派子任务';
+    if (/read_image|view_image|image/.test(n)) return '看图';
+    if (/ask_user|askuser|ask_user_question/.test(n)) return '等你确认';
+    if (/job_|schedule|automation/.test(n)) return '后台任务';
+    if (/subagent|^task$/.test(n)) return '派子任务';
+    if (/^task(list|create|update|get|output)/.test(n)) return '任务清单';
+    if (/present_files/.test(n)) return '交付文件';
+    if (/sendmessage|send_message|messagecolleague/.test(n)) return '发消息';
+    if (/^skill/.test(n)) return '加载技能';
+    if (/miniapp/.test(n)) return '小程序';
+    if (/todowrite/.test(n)) return '任务清单';
+    if (/update_goal/.test(n)) return '目标状态';
+    if (/website_deploy/.test(n)) return '部署站点';
+    if (/^mavis$/.test(n)) return '会话管理';
     return '调用工具';
   }
 
@@ -402,7 +438,7 @@
       '<div class="hf-nowtxt" id="hfNowVerb">空闲</div><div class="cap" id="hfNowWhat">等你安排任务</div>',
       '<div class="cap" id="hfNowDur"></div></div>',
       '<div class="p"><h3>工具调用</h3><div class="feed" id="hfActs"></div></div>',
-      '<div class="p"><h3>事件速率</h3><div class="rate-head"><b id="mRateVal">0</b><span>evt/min</span></div><canvas id="mRate"></canvas></div>',
+      '<div class="p"><h3>事件速率</h3><div class="rate-head"><b id="mRateVal">0</b><span>evt/min</span><em class="lg"><i class="d"></i>DSH<i class="m"></i>MM<i class="b"></i>WB<i class="c"></i>CC</em></div><canvas id="mRate"></canvas></div>',
       '<div class="p"><h3>工具分布</h3><div class="feed" id="mMix"></div></div>',
       '</section>',
       '<section class="panels hf-mini" id="hf-mini">',
@@ -433,6 +469,12 @@
       '.hf-big{font-size:16px;font-weight:800;color:#fff;margin:2px 0}',
       '#hfActs div,#hfWork div,#mChatBody div{font-size:9.5px;line-height:1.45;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:#b9bec7}',
       '#hfActs i{color:#8d939c;font-style:normal;margin-right:4px}',
+      '#hfActs em.src{font:700 8px/1 "JetBrains Mono",Consolas,monospace;font-style:normal;margin-right:5px;letter-spacing:.04em}',
+      '#hfWork div{display:flex;align-items:baseline;gap:5px}',
+      '#hfWork i.dot{width:5px;height:5px;border-radius:50%;flex:0 0 auto}',
+      '#hfWork b.tag{font:700 8px/1.2 "JetBrains Mono",Consolas,monospace;letter-spacing:.04em}',
+      '#hfWork span.tl{overflow:hidden;text-overflow:ellipsis;color:#c8ccd4}',
+      '#hfWork em.rate{margin-left:auto;font-style:normal;font:600 8.5px/1 "JetBrains Mono",Consolas,monospace;color:#8d939c}',
       '#mChatBody b{color:#fff}',
       '#hfActs b{color:#e8eaee;font-weight:700;margin:0 4px}',
       '#hfActs .bad{color:#ff7d8a}',
@@ -441,6 +483,12 @@
       '#hf-main .feed,#hf-mini .feed{justify-content:flex-start !important}',
       '.ov.status .sm{display:none !important}',
       '.rate-head{display:flex;align-items:baseline;gap:5px;margin-bottom:2px}',
+      '.rate-head em.lg{margin-left:auto;font:600 8px/1 JetBrains Mono,Consolas,monospace;font-style:normal;color:#8d939c;display:flex;align-items:center;gap:3px}',
+      '.rate-head em.lg i{width:6px;height:6px;border-radius:1px;display:inline-block}',
+      '.rate-head em.lg i.d{background:rgba(235,238,244,.85)}',
+      '.rate-head em.lg i.m{background:rgba(186,140,255,.92);margin-left:5px}',
+      '.rate-head em.lg i.b{background:rgba(14,199,168,.95);margin-left:5px}',
+      '.rate-head em.lg i.c{background:rgba(214,160,110,.92);margin-left:5px}',
       '.rate-head b{font:800 11px/1 \"JetBrains Mono\",Consolas,monospace;color:#fff}',
       '.rate-head span{font:600 9px/1 \"JetBrains Mono\",Consolas,monospace;color:#9aa0aa}',
       '#mMix{gap:2px}',
@@ -463,7 +511,10 @@
         // screen.availHeight is in CSS px on this display; the taskbar is the difference
         const avail = (screen.availHeight || vh);
         const gap = Math.max(0, vh - avail);
-        const safe = (gap > 0 ? gap : 48) + 1;      // +1px clearance over the taskbar
+        // a window taller than the screen (multi-monitor span, devtools emulation, RDP) makes
+        // the difference meaningless - fall back to the standard taskbar height instead of
+        // shoving the whole panel row up by hundreds of pixels
+        const safe = (gap > 0 && gap < 200 ? gap : 48) + 1;      // +1px clearance over the taskbar
         document.documentElement.style.setProperty('--taskbar-safe', safe + 'px');
       };
       measureTaskbar();
@@ -496,9 +547,15 @@
       const mx = Math.max(10, ...pts.map(p => p.v));
       const bw = r.w / Math.max(1, pts.length);
       pts.forEach((p, i) => {
-        const bh = (p.v / mx) * (r.h - 2);
-        r.x.fillStyle = 'rgba(235,238,244,.88)';
-        r.x.fillRect(i * bw, r.h - bh, Math.max(1, bw * 0.8), bh);
+        const bhD = ((p.d || 0) / mx) * (r.h - 2);      // DSH at the bottom
+        const bhM = ((p.m || 0) / mx) * (r.h - 2);      // MiniMax Code stacked on top
+        const bhW = ((p.w || 0) / mx) * (r.h - 2);      // WorkBuddy on top of that
+        const bhC = ((p.c || 0) / mx) * (r.h - 2);      // Claude Code on the very top
+        const x0 = i * bw, w = Math.max(1, bw * 0.8);
+        if (bhD > 0) { r.x.fillStyle = 'rgba(235,238,244,.82)'; r.x.fillRect(x0, r.h - bhD, w, bhD); }
+        if (bhM > 0) { r.x.fillStyle = 'rgba(186,140,255,.92)'; r.x.fillRect(x0, r.h - bhD - bhM, w, bhM); }
+        if (bhW > 0) { r.x.fillStyle = 'rgba(14,199,168,.95)'; r.x.fillRect(x0, r.h - bhD - bhM - bhW, w, bhW); }
+        if (bhC > 0) { r.x.fillStyle = 'rgba(214,160,110,.92)'; r.x.fillRect(x0, r.h - bhD - bhM - bhW - bhC, w, bhC); }
       });
     }
   }
@@ -508,6 +565,22 @@
     if (!PANELS_READY) buildPanels();
     const tot = st.totals || {}, sess = st.sessions || [], top = sess[0] || {};
 
+    // WorkBuddy is now a first-class data source, so the "外部 AI" panel (which used to
+    // UIA-sniff the desktop app and usually came back empty) can show real numbers.
+    const wbs = (st.bySource || {}).workbuddy;
+    const wbTop = sess.find(s2 => s2.source === 'workbuddy');
+    window.__WB = wbs
+      ? { active: wbs.active || 0, rate: wbs.rate || 0, tools: wbs.tools || 0, title: wbTop ? wbTop.title : '' }
+      : null;
+
+    // Doubao: same treatment as WorkBuddy - pull the real session title/rate from
+    // the SSE stream instead of the noisy UIA snippet.
+    const dbs = (st.bySource || {}).doubao;
+    const dbTop = sess.find(s2 => s2.source === 'doubao');
+    window.__DB = dbs
+      ? { active: dbs.active || 0, rate: dbs.rate || 0, events: dbs.events || 0, title: dbTop ? dbTop.title : '', status: dbTop ? dbTop.status : '' }
+      : null;
+
     // 现在在做什么
     let icon = '○', verb = '空闲', what = '等你安排任务';
     const pend = top.currentTool;
@@ -515,6 +588,7 @@
     else if (top.status === 'thinking') { icon = '◐'; verb = '思考中'; what = top.title ? '话题：' + top.title : '整理下一步'; }
     else if (top.status === 'tool' || (tot.activeTools || 0) > 0) { icon = '▶'; verb = '执行中'; what = '工具运行中'; }
     if ($('hfNowIcon')) $('hfNowIcon').textContent = icon;
+    if ($('hfNowIcon')) $('hfNowIcon').style.color = srcIcon(top.source);
     if ($('hfNowVerb')) $('hfNowVerb').textContent = verb;
     if ($('hfNowWhat')) $('hfNowWhat').textContent = what;
     if ($('hfNowDur')) $('hfNowDur').textContent = pend && pend.t0 ? ('已经跑了 ' + Math.max(1, Math.round((Date.now() - pend.t0) / 1000)) + ' 秒') : '';
@@ -522,13 +596,15 @@
     // 进度
     if ($('hfProg')) $('hfProg').textContent = '第 ' + (top.turn || 0) + ' 轮 · ' + (top.steps || 0) + ' 步';
     if ($('hfProgSub')) $('hfProgSub').textContent = '工具 ' + (top.tools || 0) + ' 次 · 报错 ' + (top.errors || 0) + ' 次';
-    if ($('hfProgSub2')) $('hfProgSub2').textContent = '会话：' + (top.title ? short(top.title, 14) : '—');
+    if ($('hfProgSub2')) $('hfProgSub2').textContent = srcLabel(top.source) + ' · ' + (top.title ? short(top.title, 13) : '—');
 
     // 最近动作
     const acts = (st.feed || []).slice().reverse().slice(0, 5);
     if ($('hfActs')) $('hfActs').innerHTML = acts.map(f => {
       const tm = f.t ? new Date(f.t).toTimeString().slice(0, 5) : '';
-      return '<div class="' + (f.ok === false ? 'bad' : '') + '"><i>' + tm + '</i><b>' + humanVerb(f.name) + '</b>' + esc(humanObj(f.name, f.args)) + '</div>';
+      return '<div class="' + (f.ok === false ? 'bad' : '') + '"><i>' + tm + '</i>' +
+        '<em class="src" style="color:' + srcColor(f.source) + '">' + srcLabel(f.source) + '</em>' +
+        '<b>' + humanVerb(f.name) + '</b>' + esc(humanObj(f.name, f.args)) + '</div>';
     }).join('') || '<div>暂无动作</div>';
 
     // 今日之最
@@ -544,12 +620,20 @@
     if ((top.jobsActive || 0) > 0) lines.push('后台任务 <b>' + top.jobsActive + '</b> 个');
     if ($('hfFun')) $('hfFun').innerHTML = lines.map(x => '<div>' + x + '</div>').join('');
 
-    // 会话工作台
+    // 会话工作台：两个 harness 的活跃会话并排显示，用颜色区分来源
     if ($('hfWork')) {
       const wl = [];
-      wl.push('<div>' + (top.title ? esc(short(top.title, 15)) : '无活跃会话') + '</div>');
-      wl.push('<div>第 ' + (top.turn || 0) + ' 轮 · ' + (top.steps || 0) + ' 步</div>');
-      wl.push('<div>速率 ' + (st.rate || 0) + '/分 · ' + (top.status === 'tool' ? '干活' : top.status === 'thinking' ? '思考' : '空闲') + '</div>');
+      const list2 = sess.slice(0, 4);
+      if (!list2.length) wl.push('<div><span class="tl">无活跃会话</span></div>');
+      for (const s2 of list2) {
+        const c = srcColor(s2.source);
+        const stt = s2.status === 'tool' ? '干活' : s2.status === 'thinking' ? '思考' : '空闲';
+        wl.push('<div>' +
+          '<i class="dot" style="background:' + c + '"></i>' +
+          '<b class="tag" style="color:' + c + '">' + srcLabel(s2.source) + '</b>' +
+          '<span class="tl">' + esc(short(s2.title, 14)) + '</span>' +
+          '<em class="rate">' + stt + ' ' + (s2.rate || 0) + '/m</em></div>');
+      }
       $('hfWork').innerHTML = wl.join('');
     }
 
@@ -571,7 +655,7 @@
     // bottom status + callout
     const big = $('stBig');
     if (big) big.textContent = (AC >= 0.12 ? '工作中' : '待命') + ' · ' + (st.rate || 0) + ' 事件/分';
-    if ($('chkK')) $('chkK').textContent = top.ws ? String(top.ws).toUpperCase() : 'NO ACTIVE SESSION';
+    if ($('chkK')) $('chkK').textContent = SRC_TITLE[top.source] || (top.ws ? String(top.ws).toUpperCase() : 'NO ACTIVE SESSION');
     if ($('chkV')) $('chkV').textContent = top.title ? short(top.title, 34) : 'idle — waiting for work';
     // 圆环数据卡：最近工具调用 + 会话 + 总计
     const ringCards = [];
@@ -581,15 +665,15 @@
         k: humanVerb(f.name),
         v: dur + ' ' + short(humanObj(f.name, f.args), 18),
         w: Math.min(1, (f.ms || 0) / 3000),
-        c: f.ok === false ? [240, 166, 198] : null
+        c: f.ok === false ? [240, 166, 198] : (f.source && f.source !== 'dsh' ? srcRgb(f.source) : null)
       });
     }
     for (const s2 of sess.slice(0, 3)) {
       ringCards.push({
-        k: short(s2.ws || 'SESSION', 12).toUpperCase(),
+        k: srcLabel(s2.source) + ' · ' + short(s2.ws || 'SESSION', 10).toUpperCase(),
         v: short(s2.title, 22),
         w: Math.min(1, (s2.rate || 0) / 40),
-        c: agentColor('DSH')            // internal sessions carry the DSH identity colour
+        c: srcRgb(s2.source)
       });
     }
     ringCards.push({ k: 'EVENTS', v: fmt(tot.events), w: Math.min(1, (st.rate || 0) / 60) });
@@ -861,6 +945,35 @@
 
   let extBusyUntil = 0;
 
+  /* WorkBuddy rows come from the real session feed now (window.__WB comes from /stream),
+     so they show actual session/tool numbers instead of an empty UIA placeholder. */
+  function wbView(a) {
+    if (!a || a.name !== 'WorkBuddy') return null;
+    const wb = window.__WB;
+    if (!wb) return null;
+    const state = wb.active
+      ? (wb.rate > 0 ? wb.rate + ' 事件/分' : '已接入')
+      : '无活跃会话';
+    const snippet = wb.active && wb.title ? wb.title : (wb.tools ? '今日 ' + wb.tools + ' 次工具调用' : '');
+    return { state, snippet, on: wb.active > 0 };
+  }
+
+  function dbView(a) {
+    if (!a || a.name !== 'Doubao') return null;
+    const db = window.__DB;
+    // Prefer the live SSE session title/rate; fall back to the UIA window title
+    // that /external already returns so the panel works even before SSE connects.
+    const title = (db && db.title) ? db.title : String(a.title || '').replace(/\s*-\s*豆包.*$/, '').trim();
+    const active = db ? db.active > 0 : !!a.running;
+    const rate = db ? db.rate : 0;
+    const status = db ? db.status : (a.state === '执行中' ? 'thinking' : 'idle');
+    const state = active
+      ? (status === 'thinking' ? '生成中' : rate > 0 ? rate + ' 事件/分' : a.state)
+      : '后台';
+    const snippet = title || (db && db.events ? '今日 ' + db.events + ' 条事件' : '');
+    return { state, snippet, on: active };
+  }
+
   function paintChatGptMini(data) {
     const el = document.getElementById('mChatBody');
     if (!el) return;
@@ -869,10 +982,11 @@
     // running = vivid identity colour; NOT running = greyed out. That is the whole point:
     // you glance at the panel and instantly see who is actually alive right now.
     el.innerHTML = rows.map(a => {
-      const busy = data.busy ? '生成中' : a.state;
-      const sn = a.snippet ? short(a.snippet, 34) : '';
+      const ov = wbView(a) || dbView(a);
+      const busy = ov ? ov.state : (data.busy ? '生成中' : a.state);
+      const sn = (ov ? ov.snippet : a.snippet) ? short(ov ? ov.snippet : a.snippet, 34) : '';
       const col = rgbHex(agentColor(a.name));
-      const on = !!a.running;
+      const on = ov ? (ov.on || !!a.running) : !!a.running;
       // alive: full colour + full opacity. dead: desaturated grey, low opacity.
       const dotStyle = on
         ? 'background:' + col + ';opacity:1'
@@ -897,16 +1011,19 @@
     if (data && data.busy) extBusyUntil = Date.now() + 4000;   // keep the ring alive between probes
     const color = (name) => rgbHex(agentColor(name));
     const html = rows.map(a => {
-      const sn = a.snippet ? '<div class="sn">' + esc(a.snippet) + '</div>' : '';
+      const ov = wbView(a) || dbView(a);
+      const snText = ov ? ov.snippet : a.snippet;
+      const sn = snText ? '<div class="sn">' + esc(snText) + '</div>' : '';
       const wk = a.work ? ' <span class="wk">· ' + esc(a.work) + '</span>' : '';
-      const on = !!a.running;
+      const on = ov ? (ov.on || !!a.running) : !!a.running;
       // same rule as the bottom panel: alive = vivid, dead = greyed out
       const dotStyle = on ? 'background:' + color(a.name) + ';opacity:1' : 'background:#4a4e56;opacity:.45';
       const nmStyle = on ? 'color:' + color(a.name) + ';font-weight:800' : 'color:#5b6068;font-weight:400';
+      const state = ov ? ov.state : (data.busy ? '生成中' : a.state);
       return '<div class="row" style="opacity:' + (on ? 1 : 0.62) + '">' +
         '<span class="dot" style="' + dotStyle + '"></span>' +
         '<span class="nm" style="' + nmStyle + '">' + esc(a.name) + '</span>' +
-        '<span class="st">' + (data.busy ? '生成中' : esc(a.state)) + wk + '</span></div>' + sn;
+        '<span class="st">' + esc(state) + wk + '</span></div>' + sn;
     }).join('');
     document.getElementById('extRows').innerHTML = html || '<div class="row"><span class="st">无数据</span></div>';
   }
@@ -971,20 +1088,32 @@
     document.querySelectorAll('.kpi .k').forEach((el, i) => { if (labels[i]) el.textContent = labels[i]; });
     if (!u || u.error) return;
     const t2 = u.today || {}, p = u.peak || {}, s = u.session;
+    const mm = u.minimax || null;
+    const wb = u.workbuddy || null;
+    const cc = u.claude || null;
+    const mmTok = mm ? (mm.tokens || 0) : 0;
+    const wbTok = wb ? (wb.tokens || 0) : 0;
+    const ccTok = cc ? (cc.tokens || 0) : 0;
+    const dshTok = t2.tokens || 0;
+    const allTok = dshTok + mmTok + wbTok + ccTok;
+    // cache hit rate across every plugged-in harness
+    const cIn = (t2.input || 0) + (mm ? (mm.input || 0) : 0) + (wb ? (wb.input || 0) : 0) + (cc ? (cc.input || 0) : 0);
+    const cCr = (t2.cacheRead || 0) + (mm ? (mm.cacheRead || 0) : 0) + (wb ? (wb.cacheRead || 0) : 0) + (cc ? (cc.cacheRead || 0) : 0);
+    const cHit = (cIn + cCr) ? cCr / (cIn + cCr) : 0;
     const vals = [
-      fmtTok(t2.tokens || 0),
+      fmtTok(allTok),
       '¥' + (t2.costCny || 0).toFixed(2),
       u.balance != null ? '¥' + u.balance.toFixed(2) : '—',
-      ((t2.hit || 0) * 100).toFixed(1) + '%',
+      (cHit * 100).toFixed(1) + '%',
       fmtDur(p.remainMs || 0)
     ];
     vals.forEach((v, i) => { const el = document.getElementById('k' + i); if (el) el.textContent = v; });
     const segs = document.querySelectorAll('.kpi .seg i');
     const widths = [
-      Math.min(100, (t2.tokens || 0) / 3e8 * 100),
+      Math.min(100, allTok / 3e8 * 100),
       Math.min(100, (t2.costCny || 0) / Math.max(1, u.balance || 100) * 200),
       100,
-      (t2.hit || 0) * 100,
+      cHit * 100,
       Math.min(100, (p.remainMs || 0) / 36e5 / 6 * 100)
     ];
     segs.forEach((el, i) => { el.style.width = Math.max(2, Math.round(widths[i] || 2)) + '%'; });
@@ -993,8 +1122,18 @@
     if (el) {
       const rows = [];
       if (s) rows.push('<div>本会话 <b>¥' + s.costCny.toFixed(4) + '</b> · 命中 ' + (s.hit * 100).toFixed(1) + '%</div>');
-      rows.push('<div>今日 <b>' + fmtTok(t2.tokens || 0) + ' tok</b> · ¥' + (t2.costCny || 0).toFixed(2) + '</div>');
-      if (u.balance != null) rows.push('<div>余额 <b>¥' + u.balance.toFixed(2) + '</b></div>');
+      rows.push('<div><b>DSH</b> 今日 ' + fmtTok(dshTok) + ' tok · ¥' + (t2.costCny || 0).toFixed(2) + '</div>');
+      // one line per harness, but only for the ones that actually spent tokens today
+      const srcs = [
+        { k: 'MM', d: mm, tok: mmTok, c: '#ba8cff' },
+        { k: 'WB', d: wb, tok: wbTok, c: '#0ec7a8' },
+        { k: 'CC', d: cc, tok: ccTok, c: '#d6a06e' },
+      ];
+      for (const x of srcs) {
+        if (!x.d || !x.tok) continue;
+        rows.push('<div style="color:' + x.c + '"><b>' + x.k + '</b> 今日 ' + fmtTok(x.tok) + ' tok · 命中 ' + ((x.d.hit || 0) * 100).toFixed(1) + '%</div>');
+      }
+      rows.push('<div>合计 <b>' + fmtTok(allTok) + ' tok</b>' + (u.balance != null ? ' · 余额 <b>¥' + u.balance.toFixed(2) + '</b>' : '') + '</div>');
       if (p.nextLabel) rows.push('<div>' + (p.inPeak ? '峰时' : '平价') + '剩余 <b>' + fmtDur(p.remainMs || 0) + '</b> · ' + p.nextLabel + ' 转' + (p.inPeak ? '平价' : '峰时') + '</div>');
       el.innerHTML = rows.join('');
     }
