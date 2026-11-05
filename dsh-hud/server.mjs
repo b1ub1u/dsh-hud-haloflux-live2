@@ -812,9 +812,9 @@ pollClaude();
 pollDoubao();
 setInterval(tick, POLL_MS);
 
-/* 看门狗：壁纸页面掉线时自动恢复
-   第 1 步：3 分钟无页面连接 -> reload 壁纸
-   第 2 步：再 2 分钟还是没连上 -> 重启 Lively（WebView 冻死时 reload 不一定救得回来） */
+/* 看门狗：壁纸页面掉线时【只记录，不动作】
+   旧的自动恢复策略已废弃：那条路径里的每一次 setwp --file reload 都会撕掉播放器、
+   泄漏一个只有重启才能回收的 GPU 进程。详见下面 OBSERVE ONLY 的说明。 */
 /* Wallpaper watchdog — OBSERVE ONLY (2026-11-06).
    ---------------------------------------------------------------------------
    WHY THIS NO LONGER TOUCHES LIVELY (measured, not guessed):
@@ -838,7 +838,6 @@ setInterval(tick, POLL_MS);
      - still sample state so a human can see WHY the page went quiet
    Recovery is an explicit user action: run dsh-hud/recover-wallpaper.cmd.
    --------------------------------------------------------------------------- */
-const LIVELY_EXE = 'C:\\Program Files\\Lively Wallpaper\\Lively.exe';
 const WD_IDLE_MS = 180000;       // 3 min without a wallpaper client before reporting
 let wdPhase = 0;
 
