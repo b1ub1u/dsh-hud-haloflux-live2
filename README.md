@@ -5,9 +5,10 @@
 把 [HALOFLUX](https://github.com/Ryder191/haloflux)（单文件 Canvas 科幻可视化）接到本机 **DeepSeek Harness** 的真实会话数据上：
 轮盘转速、光束爆发、面板数字全由真实事件驱动——空闲时慢速待命，干活时爆发。
 
-同时把**本机播放器**（QQ 音乐 / Spotify / 豆包 / B 站…任何接入 Windows SMTC 的播放器）和
-**外部 AI 桌面应用**（ChatGPT / WorkBuddy / MiniMax / 豆包）状态接进同一画面，
-最终作为 **Lively Wallpaper** 的桌面壁纸常驻。
+同时把**多个 AI 平台**（DeepSeek Harness / MiniMax Code / WorkBuddy / Claude Code / 豆包）的
+真实会话数据接进同一画面，谁在干活、谁在思考、谁在空闲一目了然；再把**本机播放器**
+（QQ 音乐 / Spotify / 豆包 / B 站…任何接入 Windows SMTC 的播放器）和
+**外部 AI 桌面应用**状态接进同一画面，最终作为 **Lively Wallpaper** 的桌面壁纸常驻。
 
 > ⚠️ HALOFLUX 采用 **PolyForm Noncommercial** 许可：**仅限个人非商业使用**，详见 [NOTICE.md](NOTICE.md)。
 
@@ -19,9 +20,14 @@
 
 ### 数据联动
 - **真实数据驱动**：事件速率 → 环带转速；每次工具调用 → 一次真实光束爆发；报错 → 闪光变密
+- **5 个数据源**：DeepSeek Harness / MiniMax Code / WorkBuddy / Claude Code / 豆包，
+  各自独立读会话日志归一成同一套事件词汇（turn / step / tool / message）
 - **空闲待命**：无事件时降为慢速漂移（10% 时间轴），不空转
 - **人话面板**：现在任务 / 进度 / 工具调用 / 会话工作台 / 今日之最 / 事件速率 / 工具分布
+- **多平台并发可视化**：顶部多卡标题堆叠（谁最活跃谁的卡浮最前，其余缩小压暗），
+  底部「现在任务」渐变滚动带（第一行全亮、往下逐层变暗、上下边缘渐隐无缝循环）
 - **用量费用**：今日 tokens、花费、余额、缓存命中、峰谷剩余（读 `dsh-cost-meter` 账本）
+- **路径脱敏**：面板与截图上的文件路径只显示末两段，用户名自动打码，不外泄本机结构
 
 ### 外部 AI 联动
 - **四家桌面 AI 状态**：ChatGPT / WorkBuddy / MiniMax Code / 豆包，经 UI Automation 读取窗口与界面文本
@@ -67,11 +73,16 @@ powershell -NoProfile -ExecutionPolicy Bypass -File dsh-hud\install.ps1 -Uninsta
 
 | 路径 | 说明 |
 |---|---|
-| `dsh-hud/server.mjs` | 数据服务：会话增量解码、SSE、媒体/外部 AI/用量代理 |
-| `dsh-hud/bridge.js` | 注入 HALOFLUX 的桥：联动、面板、中文化、壁纸模式、身份染色 |
-| `dsh-hud/external.ps1` | 外部 AI 状态（UI Automation，四家通用探测） |
+| `dsh-hud/server.mjs` | 数据服务：5 源会话增量解码、SSE、媒体/外部 AI/用量代理 |
+| `dsh-hud/minimax-source.mjs` | MiniMax Code 数据源（JSONL + sqlite） |
+| `dsh-hud/workbuddy-source.mjs` | WorkBuddy 数据源（JSONL + workbuddy.db） |
+| `dsh-hud/claude-source.mjs` | Claude Code 数据源（JSONL transcripts） |
+| `dsh-hud/doubao-source.mjs` | 豆包数据源（UIA 快照） |
+| `dsh-hud/bridge.js` | 注入 HALOFLUX 的桥：联动、面板、多卡堆叠、滚动带、中文化、身份染色、路径脱敏 |
+| `dsh-hud/external.ps1` | 外部 AI 状态（UI Automation，五家通用探测） |
 | `dsh-hud/media.ps1` | 系统媒体会话读写（上下曲/播放暂停） |
 | `dsh-hud/fix-wallpaper-screen.ps1` | 自动选屏 + 任务栏安全边距 |
+| `dsh-hud/screenshot.mjs` | Edge headless + CDP 高端截图工具 |
 | `dsh-hud/wall-proj/` | Lively / Wallpaper Engine 壁纸工程 |
 | `dsh-hud/install.ps1` | **一键安装**（依赖 + 壁纸 + 自启 + 服务 + 选屏） |
 | `dsh-hud/uninstall.ps1` | 卸载（停服务 + 撤壁纸 + 删自启） |
@@ -82,13 +93,14 @@ powershell -NoProfile -ExecutionPolicy Bypass -File dsh-hud\install.ps1 -Uninsta
 
 ```
 ~/.dsh/sessions/<workspace>/session-*.jsonl.zstd
-        │ 每 500ms 增量解码（多帧 zstd）
+~/.minimax/... · ~/.workbuddy/... · ~/.claude/projects · doubao UIA
+        │ 每 500ms 增量解码（多帧 zstd / jsonl）
         ▼
-dsh-hud/server.mjs  (127.0.0.1:7788)
+dsh-hud/server.mjs  (127.0.0.1:7788)  ← 5 个 source 适配器归一事件
         │ SSE /stream · JSON /state /usage /media /external /probe
         ▼
 haloflux/lab.html + 运行时注入 bridge.js
-        │ setParam() / onBeat() 驱动内部参数
+        │ setParam() / onBeat() 驱动内部参数；多卡堆叠 / 滚动带
         ▼
 Lively Wallpaper（WebView2）→ 桌面壁纸
 ```
