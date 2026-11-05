@@ -156,13 +156,46 @@ function Get-UiaAppInfo([string]$procName, [int]$maxSnippet = 110) {
   $wins = @([ExtWin2]::All([uint32[]]$pids))
   $fg = [ExtWin2]::GetForegroundWindow().ToInt64()
   $best = $null; $bestScore = -1; $vis = $false; $min = $false; $title = ''
+  # First pass: if the foreground window belongs to this app, always prefer it —
+  # that is the window the user is actually looking at right now, even if a
+  # background embedded browser/WebView window happens to be larger.
   foreach ($w in $wins) {
     $p = $w -split '\|'
     if ($p.Count -lt 7) { continue }
-    $area = [int]$p[1] * [int]$p[2]
-    if ($area -lt 10000) { continue }          # minimised / hidden windows have no useful content
-    $score = $area + $(if ($p[3] -eq 'True') { 1000000 } else { 0 })
-    if ($score -gt $bestScore) { $bestScore = $score; $best = $w; $vis = ($p[3] -eq 'True'); $min = ($p[4] -eq 'True'); $title = $p[6] }
+    if ([int64]$p[0] -eq $fg) { $best = $w; break }
+  }
+  # Fallback: pick the largest visible window. Penalise embedded browser windows
+  # (title contains "浏览器") since they are WebViews inside the client, not the
+  # main conversation/agent window. For Doubao specifically, embedded browser
+  # windows are common and must never win over the main chat window.
+  if (-not $best) {
+    foreach ($w in $wins) {
+      $p = $w -split '\|'
+      if ($p.Count -lt 7) { continue }
+      $area = [int]$p[1] * [int]$p[2]
+      if ($area -lt 10000) { continue }
+      $score = $area + $(if ($p[3] -eq 'True') { 1000000 } else { 0 })
+      if ($p[6] -match '浏览器|Browser') { $score = -1 }   # skip embedded browser windows entirely
+      if ($score -gt $bestScore) { $bestScore = $score; $best = $w; $vis = ($p[3] -eq 'True'); $min = ($p[4] -eq 'True'); $title = $p[6] }
+    }
+  } else {
+    $p = $best -split '\|'
+    # If the foreground window happens to be an embedded browser, discard it and
+    # fall through to the largest non-browser window instead.
+    if ($p[6] -match '浏览器|Browser') {
+      $best = $null
+      foreach ($w in $wins) {
+        $p2 = $w -split '\|'
+        if ($p2.Count -lt 7) { continue }
+        if ($p2[6] -match '浏览器|Browser') { continue }
+        $area = [int]$p2[1] * [int]$p2[2]
+        if ($area -lt 10000) { continue }
+        $score = $area + $(if ($p2[3] -eq 'True') { 1000000 } else { 0 })
+        if ($score -gt $bestScore) { $bestScore = $score; $best = $w; $vis = ($p2[3] -eq 'True'); $min = ($p2[4] -eq 'True'); $title = $p2[6] }
+      }
+    } else {
+      $vis = ($p[3] -eq 'True'); $min = ($p[4] -eq 'True'); $title = $p[6]
+    }
   }
   if (-not $best) {
     return [ordered]@{ name=$procName; running=$true; state='后台'; snippet=''; work=''; agent=$false; title='' }

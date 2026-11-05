@@ -1,7 +1,10 @@
-// CDP screenshot helper: node screenshot.mjs <url> <out.png> [waitMs] [port]
-const [url, out, waitMs = '6000', portArg = '9333'] = process.argv.slice(2);
+// CDP screenshot helper: node screenshot.mjs <url> <out.png> [waitMs] [port] [w] [h] [scale]
+const [url, out, waitMs = '6000', portArg = '9333', wArg = '1600', hArg = '900', scaleArg = '1'] = process.argv.slice(2);
 const PORT = Number(portArg);
-const hardStop = setTimeout(() => { console.error('timeout'); process.exit(4); }, 45000);
+const VW = Number(wArg), VH = Number(hArg), SCALE = Number(scaleArg);
+// hardStop must outlast waitMs: a full 2560×1600 capture with an animated canvas can
+// take ~20 s to encode, and a 45 s cap killed legitimate high-DPI shots.
+const hardStop = setTimeout(() => { console.error('timeout'); process.exit(4); }, Math.max(45000, Number(waitMs) + 40000));
 
 const get = (p, init) => fetch(`http://127.0.0.1:${PORT}${p}`, { ...init, signal: AbortSignal.timeout(5000) });
 
@@ -32,7 +35,7 @@ const send = (method, params = {}) => new Promise((res) => {
 });
 
 await send('Page.enable');
-await send('Emulation.setDeviceMetricsOverride', { width: 1600, height: 900, deviceScaleFactor: 1, mobile: false });
+await send('Emulation.setDeviceMetricsOverride', { width: VW, height: VH, deviceScaleFactor: SCALE, mobile: false });
 await send('Page.navigate', { url });
 await new Promise(r => setTimeout(r, Number(waitMs)));
 

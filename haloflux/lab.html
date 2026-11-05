@@ -49,6 +49,19 @@ header{display:grid;grid-template-columns:minmax(240px,1.7fr) repeat(5,minmax(0,
 .chk{left:0;top:0;will-change:transform;background:rgba(6,7,9,.97);border:1px solid rgba(150,160,175,.55);padding:12px 18px;transition:opacity .4s;z-index:9;box-shadow:0 3px 18px rgba(0,0,0,.75),inset 0 0 0 1px rgba(255,255,255,.04);backdrop-filter:blur(3px)}
 .chk b{display:block;font-size:15px;color:#b9c2d0;font-weight:700;letter-spacing:.12em;margin-bottom:6px}
 .chk span{font-size:27px;color:#ffffff;font-weight:700;white-space:nowrap;text-shadow:0 1px 8px rgba(0,0,0,.9)}
+/* ---- multi-harness stack (foreground = brightest & largest, others behind) ---- */
+#chkStack{position:absolute;inset:0;pointer-events:none;z-index:8;overflow:visible}
+#chkStack .hcard{position:absolute;left:0;top:0;transform-origin:0 0;
+  background:rgba(6,7,9,.97);border:1px solid rgba(150,160,175,.5);padding:10px 16px;
+  will-change:transform,opacity;transition:transform .45s cubic-bezier(.22,.61,.36,1),opacity .45s,filter .45s;
+  box-shadow:0 3px 18px rgba(0,0,0,.7)}
+#chkStack .hcard .hk{display:block;font-size:14px;font-weight:700;letter-spacing:.12em;margin-bottom:5px}
+#chkStack .hcard .hv{display:block;font-size:25px;color:#fff;font-weight:700;white-space:nowrap;text-shadow:0 1px 8px rgba(0,0,0,.9)}
+#chkStack .hcard .hbadge{display:inline-block;margin-left:10px;font-size:11px;font-weight:700;letter-spacing:.08em;
+  padding:1px 6px;border:1px solid currentColor;vertical-align:middle;opacity:.9}
+#chkStack .hcard.fg{opacity:1;filter:none}
+#chkStack .hcard.bg2{opacity:.55;filter:grayscale(.35) brightness(.8)}
+#chkStack .hcard.bg3{opacity:.32;filter:grayscale(.6) brightness(.62)}
 .console{top:10px;right:14px;border:1px solid var(--line2);padding:3px 8px;background:rgba(8,9,11,.8)}
 .music{top:10px;right:104px;z-index:3;pointer-events:auto;display:flex;align-items:center;gap:6px;border:1px solid var(--line2);padding:2px 8px;background:rgba(8,9,11,.8);user-select:none}
 .music .mbtn{cursor:pointer;display:flex;align-items:center;gap:5px}
@@ -147,6 +160,8 @@ header{display:grid;grid-template-columns:minmax(240px,1.7fr) repeat(5,minmax(0,
     </div>
     <audio id="bgmAudio" data-src="audio/sw421k.mp3" loop preload="auto" playsinline></audio>
     <div class="ov chk" id="chk"><b id="chkK">STABILITY CHECK</b><span id="chkV">CFL = |u| Δt / Δx</span></div>
+    <!-- multi-harness stack: bridge.js clones this template per running AI platform -->
+    <div id="chkStack"></div>
     <div class="ov status"><div class="big" id="stBig">7 / 11 METHODS · 4 PENDING</div><div class="sm">independent runs · shared event bus</div></div>
   </div>
 
@@ -1200,16 +1215,27 @@ const CHECKS = [['STABILITY CHECK', 'CFL = |u| Δt / Δx'], ['MASS CONSERVATION'
   ['BOUNDARY', 'u · n = 0  on ∂Ω'], ['PROJECTION', '∇²p = ∇ · u* / Δt']];
 let chkI = 0;
 const chkEl = document.getElementById('chk');
-function drawCallout() {
+/* The legacy single readout is hidden: bridge.js renders one card per running AI
+   platform into #chkStack (foreground = most recently active, others dimmed behind).
+   We keep this element so the original demo does not error out, and expose the ring
+   anchor so the bridge can position its stack along the same leader line. */
+chkEl.style.display = 'none';
+window.__ringAnchor = () => {
   const a = -thS * 0.32;
   const anchor = toScreen(cx + Math.cos(a) * (RO + 30), cy + Math.sin(a) * (RO + 30));
   const box = toScreen(cx + Math.cos(a) * (RO + 30) + 120, cy + Math.sin(a) * (RO + 30) - 40);
   // integer pixel snapping: fractional translate() makes WebView2 blur the text
-  const bx = Math.round(Math.min(W - 250, Math.max(8, box.x))), by = Math.round(Math.min(H - 78, Math.max(40, box.y)));
-  chkEl.style.transform = `translate(${bx}px,${by}px)`;
+  const bx = Math.round(Math.min(W - 250, Math.max(8, box.x)));
+  const by = Math.round(Math.min(H - 78, Math.max(40, box.y)));
+  return { anchor, bx, by, W, H };
+};
+function drawCallout() {
+  const r = (typeof window.__ringAnchor === 'function') ? window.__ringAnchor() : null;
+  if (!r) return;
+  chkEl.style.transform = `translate(${r.bx}px,${r.by}px)`;
   S.strokeStyle = 'rgba(230,233,238,.55)'; S.lineWidth = 0.8;
-  S.beginPath(); S.moveTo(anchor.x, anchor.y); S.lineTo(bx, by + 12); S.stroke();
-  S.fillStyle = '#fff'; S.fillRect(anchor.x - 1.5, anchor.y - 1.5, 3, 3);
+  S.beginPath(); S.moveTo(r.anchor.x, r.anchor.y); S.lineTo(r.bx, r.by + 12); S.stroke();
+  S.fillStyle = '#fff'; S.fillRect(r.anchor.x - 1.5, r.anchor.y - 1.5, 3, 3);
 }
 /* the rotating fake CHECKS readout is disabled: the DSH bridge (bridge.js) owns
    #chkK / #chkV now and writes the real session title there. Rotating demo text

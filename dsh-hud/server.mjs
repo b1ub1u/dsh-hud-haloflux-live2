@@ -1,7 +1,7 @@
 import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { readdirSync, statSync, readFileSync } from 'node:fs';
-import { execFile } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
 import { join, extname, resolve, normalize } from 'node:path';
 import { homedir } from 'node:os';
 import zlib from 'node:zlib';
@@ -37,6 +37,14 @@ const MIME = {
 };
 
 /* ---------------- workspace name decode ---------------- */
+/* The DSH session dir encodes an absolute path ("--D-56587-Documents-...--"), but the
+   encoding is LOSSY: the same "-" is used for a path separator AND for hyphens that are
+   part of folder names ("deepseek-harness" -> "deepseek-harness", "default-workspace" ->
+   "default-workspace"). Rebuilding a path from it is therefore guesswork, which is how
+   the HUD used to display "D\56587\Documents\deepseek\harness\default\workspace" instead
+   of "default-workspace".
+   We now return the raw token only as a placeholder; onEvent() replaces it with the
+   trailing segment of the REAL cwd that the session's first record carries. */
 function decodeWs(enc) {
   const body = enc.replace(/^--/, '').replace(/--$/, '');
   let out = '';
@@ -44,7 +52,7 @@ function decodeWs(enc) {
     if (body[i] === '~') { out += String.fromCharCode(parseInt(body.slice(i + 1, i + 5), 16)); i += 4; }
     else out += body[i];
   }
-  return out.replace(/^-+|-+$/g, '').replace(/-/g, '\\') || enc;
+  return out || enc;
 }
 
 /* ---------------- session discovery (cached 3s) ---------------- */
@@ -114,11 +122,31 @@ function newSess(entry) {
   };
 }
 
+/* Privacy scrub applied at the SOURCE, so every consumer (panels, ring cards, SSE,
+   /state, /sources) gets the safe form without each of them having to remember.
+   Absolute paths leak the account name and the project layout to anyone looking at
+   the wallpaper or a shared screenshot; keep only the last two segments. */
+function scrubPath(s) {
+  let t = String(s);
+  t = t.replace(/["']?[A-Za-z]:\\(?:[^\\\/"'|]+\\?){1,}/g, (m0) => {
+    const segs = m0.replace(/["']/g, '').split(/[\\\/]+/).filter(Boolean);
+    return '…\\' + segs.slice(-2).join('\\');
+  });
+  t = t.replace(/["']?\/?(?:[\w.\-]+\/){2,}[\w.\-]+/g, (m0) => {
+    const segs = m0.replace(/["']/g, '').split('/').filter(Boolean);
+    if (segs.length < 3) return m0;
+    return '…/' + segs.slice(-2).join('/');
+  });
+  t = t.replace(/\/home\/[A-Za-z0-9._-]+\//g, '/home/…/');
+  t = t.replace(/\/Users\/[A-Za-z0-9._-]+\//g, '/Users/…/');
+  return t;
+}
+
 function summarizeArgs(name, args) {
   try {
     const a = typeof args === 'string' ? JSON.parse(args) : (args || {});
     const pick = a.description || a.command || a.path || a.file_path || a.pattern || a.query || a.url || a.prompt || a.title || '';
-    return String(pick).replace(/\s+/g, ' ').trim().slice(0, 110);
+    return scrubPath(String(pick).replace(/\s+/g, ' ').trim()).slice(0, 110);
   } catch { return ''; }
 }
 
@@ -127,11 +155,14 @@ function onEvent(s, ev) {
   s.events++; s.lastType = t; s.lastTime = time;
   s.rateTimes.push(time);
   const cwd = ev.cwd || d.cwd;
-  // the source's own workspace label wins (WorkBuddy formats timestamp folders, DSH decodes
-  // the encoded folder name); the raw path is only a fallback for sources that have none.
+  // Workspace label policy:
+  //  - adapter sources (minimax/workbuddy/claude) pass a friendly label up front -> keep it
+  //  - DSH passes a lossy decoded token -> replace it with the real cwd's trailing segment
   if (t === 'session' && cwd) {
     s.cwd = cwd;
-    if (!s.ws) s.ws = String(cwd).split(/[\\/]/).filter(Boolean).pop() || s.ws;
+    const seg = String(cwd).split(/[\\/]+/).filter(Boolean).pop();
+    if (seg && s.source === 'dsh') s.ws = seg;        // real path wins for DSH
+    else if (!s.ws) s.ws = seg || s.ws;              // others: only fill an empty label
   }
   if (t === 'session') s.startedAt = ev.createdAt || d.createdAt || s.startedAt || 0;
   if (t === 'session/title' && d.title) s.title = d.title;
@@ -254,18 +285,24 @@ function aggregate() {
   for (const s of list) for (const f of s.feed) feed.push({ ...f, ws: s.ws, sid: s.id, title: s.title, source: s.source, agent: s.agent });
   feed.sort((a, b) => b.t - a.t);
 
-  // per-source breakdown: DSH and MiniMax Code are driven side by side
+  // per-source breakdown.
+  // An adapter that just connected usually has no event in the last 15 min (its session
+  // history is already on disk), so counting only the ACTIVE list used to make a perfectly
+  // healthy MiniMax / WorkBuddy source look "not connected". We therefore count EVERY known
+  // session per source, and expose `active` separately.
   const bySource = {};
-  const ensure = (k) => bySource[k] || (bySource[k] = { rate: 0, rateShort: 0, active: 0, tools: 0, events: 0, errors: 0 });
-  for (let i = 0; i < list.length; i++) {
-    const s = list[i], v = sums[i];
-    const b = ensure(v.source || 'dsh');
-    b.rate += v.rate;
+  const ensureB = (k) => bySource[k] || (bySource[k] = {
+    rate: 0, rateShort: 0, sessions: 0, active: 0, tools: 0, events: 0, errors: 0, lastAt: 0,
+  });
+  for (const s of sessions.values()) {
+    if (!s.ready) continue;
+    const b = ensureB(s.source || 'dsh');
+    b.sessions += 1;
+    b.tools += s.tools; b.events += s.events; b.errors += s.errors;
+    b.lastAt = Math.max(b.lastAt, s.lastTime || 0);
+    if (now - (s.lastTime || 0) < ACTIVE_WINDOW) b.active += 1;
+    b.rate += s.rateTimes.filter(t => t > now - 60000).length;
     b.rateShort += s.rateTimes.filter(t => t > now - 4000).length;
-    b.active += 1;
-    b.tools += v.tools;
-    b.events += v.events;
-    b.errors += v.errors;
   }
 
   // keep both sources on screen: top N of each, then re-sorted by recency
@@ -638,12 +675,37 @@ const server = createServer(async (req, res) => {
   }
   if (p === '/external') {
     lastPagePollAt = Date.now();
-    if (Date.now() - externalCache.at > 3000) refreshExternal();
-    return sendJson(res, { ...externalCache.data, busy: Date.now() < externalBusyUntil, age: Date.now() - externalCache.at });
+    const stale = Date.now() - externalCache.at > 3000;
+    if (stale && !externalBusy) refreshExternal();
+    // First request after boot: the probe is async, so returning the empty cache here
+    // made a freshly started HUD show "no external AI". Wait (max 3.5 s) for the very
+    // first snapshot so the panel is populated on the first paint.
+    if (!externalCache.at && externalBusy) {
+      const deadline = Date.now() + 3500;
+      while (!externalCache.at && Date.now() < deadline) {
+        await new Promise(r => setTimeout(r, 100));
+      }
+    }
+    return sendJson(res, {
+      ...externalCache.data,
+      busy: Date.now() < externalBusyUntil,
+      age: externalCache.at ? (Date.now() - externalCache.at) : 0,   // never a bogus absolute epoch
+    });
   }
   if (p === '/media') {
-    if (Date.now() - mediaCache.at > 3000) refreshMedia('status');
-    return sendJson(res, { ...mediaCache.data, age: Date.now() - mediaCache.at });
+    const stale = Date.now() - mediaCache.at > 3000;
+    if (stale && !mediaBusy) refreshMedia('status');
+    // same first-paint fix as /external: wait for the very first media snapshot
+    if (!mediaCache.at && mediaBusy) {
+      const deadline = Date.now() + 3000;
+      while (!mediaCache.at && Date.now() < deadline) {
+        await new Promise(r => setTimeout(r, 100));
+      }
+    }
+    return sendJson(res, {
+      ...mediaCache.data,
+      age: mediaCache.at ? (Date.now() - mediaCache.at) : 0,
+    });
   }
   if (p === '/media/action') {
     const act = url.searchParams.get('do') || 'toggle';
@@ -694,7 +756,12 @@ const server = createServer(async (req, res) => {
   if (p === '/' || p === '/index.html' || p === '/live' || p === '/live.html' || p === '/wall' || p === '/wall.html') {
     const base = await readFile(join(STATIC_DIR, 'lab.html'), 'utf8');
     const bridge = await readFile(join(ROOT, 'dsh-hud', 'bridge.js'), 'utf8');
-    const html = base.replace('</body>', `<script>${bridge}</script>\n</body>`);
+    // IMPORTANT: replace() with a STRING replacement expands $-patterns ($&, $`, $', $1…).
+    // bridge.js contains the literal '$' (currency tag), so a string replacement turned
+    // "$'" into "everything after the match" and corrupted the whole injected script
+    // (SyntaxError: Invalid or unexpected token -> the bridge never ran). Use a
+    // replacer FUNCTION so the injected text is taken literally.
+    const html = base.replace('</body>', () => `<script>${bridge}</script>\n</body>`);
     const b = Buffer.from(html);
     res.writeHead(200, { 'content-type': MIME['.html'], 'cache-control': 'no-store', 'content-length': b.length });
     return res.end(b);
@@ -748,27 +815,70 @@ setInterval(tick, POLL_MS);
 /* 看门狗：壁纸页面掉线时自动恢复
    第 1 步：3 分钟无页面连接 -> reload 壁纸
    第 2 步：再 2 分钟还是没连上 -> 重启 Lively（WebView 冻死时 reload 不一定救得回来） */
+/* Wallpaper watchdog — CONSERVATIVE MODE.
+   The old version looped forever: "no client for 3 min -> setwp reload", "still none
+   after 2 min -> taskkill Lively + relaunch". When the wallpaper merely wasn't
+   connected yet (service restarted, Lively still booting), it kept rewriting the
+   Lively layout, which replaced dshhaloflux.001 with other wallpapers and left the
+   desktop with no HUD at all. It could also fight a legitimately different wallpaper.
+   New policy:
+     - Lively not running  -> do nothing (user may have closed it on purpose)
+     - one reload attempt  -> then STOP re-reloading and just log
+     - never taskkill Lively automatically
+     - any client connect  -> reset the counter and arm one fresh attempt */
+const LIVELY_EXE = 'C:\\Program Files\\Lively Wallpaper\\Lively.exe';
+const WD_IDLE_MS = 180000;       // 3 min without a wallpaper client before acting
+const WD_MAX_RELOADS = 1;        // one automatic reload per outage, then stay quiet
 let wdPhase = 0;
+let wdReloadsThisOutage = 0;
+
 setInterval(() => {
   const pageFresh = Date.now() - lastPagePollAt < 180000;
-  if (clients.size > 0 && pageFresh) { lastClientAt = Date.now(); wdPhase = 0; return; }
-  const idle = Date.now() - lastClientAt;
-  const LIVELY = 'C:\\Program Files\\Lively Wallpaper\\Lively.exe';
-  if (idle < 180000) return;
-  if (wdPhase === 0) {
-    wdPhase = 1; lastClientAt = Date.now(); lastPagePollAt = Date.now();
-    try { execFile(LIVELY, ['setwp', '--file', 'reload'], { windowsHide: true, timeout: 20000 }, () => {}); } catch (e) {}
-    console.log('[watchdog] no wallpaper client for 3min -> reload wallpaper');
-  } else if (idle >= 120000) {
-    wdPhase = 0; lastClientAt = Date.now(); lastPagePollAt = Date.now();
-    try {
-      execFile('taskkill', ['/IM', 'Lively.exe', '/F'], { windowsHide: true }, () => {
-        setTimeout(() => { try { execFile(LIVELY, [], { windowsHide: true }, () => {}); } catch (e) {} }, 3000);
-      });
-    } catch (e) {}
-    console.log('[watchdog] still no client -> restart Lively');
+  if (clients.size > 0 && pageFresh) {
+    // healthy again: re-arm exactly one automatic reload for the next outage
+    lastClientAt = Date.now();
+    wdPhase = 0;
+    wdReloadsThisOutage = 0;
+    return;
   }
+  const idle = Date.now() - lastClientAt;
+  if (idle < WD_IDLE_MS) return;
+
+  // Lively is not running: silently give up. Relaunching it is the user's call.
+  let livelyUp = false;
+  try { livelyUp = !!GetLivelyRunning(); } catch (e) { livelyUp = false; }
+  if (!livelyUp) {
+    if (wdPhase !== 2) { wdPhase = 2; console.log('[watchdog] no client and Lively is not running -> idle (not relaunching)'); }
+    return;
+  }
+
+  if (wdReloadsThisOutage >= WD_MAX_RELOADS) {
+    if (wdPhase !== 2) { wdPhase = 2; console.log('[watchdog] still no client after the single reload -> giving up (manual fix needed)'); }
+    return;
+  }
+
+  // one (and only one) reload attempt
+  wdReloadsThisOutage += 1;
+  wdPhase = 1;
+  lastClientAt = Date.now();
+  lastPagePollAt = Date.now();
+  try { execFile(LIVELY_EXE, ['setwp', '--file', 'reload'], { windowsHide: true, timeout: 20000 }, () => {}); } catch (e) {}
+  console.log('[watchdog] no wallpaper client for 3min -> single reload attempt (no taskkill)');
 }, 60000);
+
+/* Is Lively running? Use tasklist (cheap, no window) instead of reloading blindly. */
+let livelyCheck = { at: 0, running: false };
+function GetLivelyRunning() {
+  if (Date.now() - livelyCheck.at < 15000) return livelyCheck.running;
+  let running = false;
+  try {
+    // synchronous on purpose: it runs once a minute, and cost is ~10 ms
+    const out = execFileSync('tasklist', ['/FI', 'IMAGENAME eq Lively.exe', '/NH'], { windowsHide: true, encoding: 'utf8', timeout: 8000 });
+    running = /Lively\.exe/i.test(String(out || ''));
+  } catch (e) { running = false; }
+  livelyCheck = { at: Date.now(), running };
+  return running;
+}
 
 server.on('error', (e) => {
   if (e.code === 'EADDRINUSE') { console.log(`port ${PORT} already in use — HUD server is already running`); process.exit(0); }

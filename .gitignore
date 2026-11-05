@@ -15,3 +15,8 @@ Thumbs.db
 .vscode/
 .idea/
 *.swp
+
+dsh-hud/err.log
+dsh-hud/out.log
+dsh-hud/_*.mjs
+dsh-hud/colors-reference.html

@@ -419,12 +419,39 @@
     return '调用工具';
   }
 
+  /* ---------- privacy scrub for on-screen text ----------
+     The wallpaper is visible to anyone who glances at the desktop (and to anyone you
+     share a screenshot with), so absolute paths must never be rendered verbatim:
+     "D:\\56587\\Documents\\deepseek-harness\\default-workspace\\dsh-hud\\bridge.js"
+     leaks the user name and the project layout. We keep the last two segments, which
+     is all the HUD actually needs, and drop the drive + home prefix.
+     This runs BEFORE truncation so the useful tail survives. */
+  function scrubPath(s) {
+    let t = String(s);
+    // Windows absolute path, optionally quoted
+    t = t.replace(/["']?[A-Za-z]:\\(?:[^\\\/"'|]+\\?){1,}/g, (m0) => {
+      const segs = m0.replace(/["']/g, '').split(/[\\\/]+/).filter(Boolean);
+      const tail = segs.slice(-2).join('\\');
+      return '…\\' + tail;
+    });
+    // POSIX absolute path
+    t = t.replace(/["']?\/?(?:[\w.\-]+\/){2,}[\w.\-]+/g, (m0) => {
+      const segs = m0.replace(/["']/g, '').split('/').filter(Boolean);
+      if (segs.length < 3) return m0;
+      return '…/' + segs.slice(-2).join('/');
+    });
+    // home directory forms: ~/... or /home/<user>/...
+    t = t.replace(/\/home\/[A-Za-z0-9._-]+\//g, '/home/…/');
+    t = t.replace(/\/Users\/[A-Za-z0-9._-]+\//g, '/Users/…/');
+    return t;
+  }
+
   function humanObj(name, args) {
     if (!args) return '';
     let a2 = args;
-    if (typeof a2 === 'string') { try { a2 = JSON.parse(a2); } catch (e) { return short(String(a2).replace(/\s+/g, ' '), 56); } }
+    if (typeof a2 === 'string') { try { a2 = JSON.parse(a2); } catch (e) { return short(scrubPath(String(a2).replace(/\s+/g, ' ')), 56); } }
     const pick = a2.description || a2.path || a2.file_path || a2.command || a2.pattern || a2.query || a2.url || a2.prompt || a2.title;
-    return pick ? short(String(pick).replace(/\s+/g, ' '), 56) : '';
+    return pick ? short(scrubPath(String(pick).replace(/\s+/g, ' ')), 56) : '';
   }
 
   function buildPanels() {
@@ -435,8 +462,7 @@
     wrap.innerHTML = [
       '<section class="panels" id="hf-main">',
       '<div class="p"><h3>现在任务</h3><div class="hf-now" id="hfNowIcon">○</div>',
-      '<div class="hf-nowtxt" id="hfNowVerb">空闲</div><div class="cap" id="hfNowWhat">等你安排任务</div>',
-      '<div class="cap" id="hfNowDur"></div></div>',
+      '<div class="hf-nowscroll" id="hfNowScroll"><div class="hf-nowlist" id="hfNowList"></div></div></div>',
       '<div class="p"><h3>工具调用</h3><div class="feed" id="hfActs"></div></div>',
       '<div class="p"><h3>事件速率</h3><div class="rate-head"><b id="mRateVal">0</b><span>evt/min</span><em class="lg"><i class="d"></i>DSH<i class="m"></i>MM<i class="b"></i>WB<i class="c"></i>CC</em></div><canvas id="mRate"></canvas></div>',
       '<div class="p"><h3>工具分布</h3><div class="feed" id="mMix"></div></div>',
@@ -465,6 +491,22 @@
       '.panels .cap{font-size:9.5px !important;white-space:normal !important;line-height:1.4;color:#8d939c !important;margin-top:2px !important}',
       '.hf-now{position:absolute;top:6px;right:9px;font-size:14px;line-height:1;color:#8fe3ff;margin:0}',
       '#hf-main .p:first-child{position:relative}',
+      // 现在任务：竖向循环滚动带。上下边缘用 mask 渐变淡出，视觉上像一条无限流动的队列。
+      '.hf-nowscroll{position:relative;flex:1;min-height:0;overflow:hidden;' +
+        '-webkit-mask-image:linear-gradient(to bottom,transparent 0,#000 16%,#000 84%,transparent 100%);' +
+        'mask-image:linear-gradient(to bottom,transparent 0,#000 16%,#000 84%,transparent 100%)}',
+      '.hf-nowlist{will-change:transform;backface-visibility:hidden}',
+      '.hf-row{display:flex;align-items:baseline;gap:5px;height:24px;line-height:24px;' +
+        'white-space:nowrap;overflow:hidden;transition:opacity .5s,filter .5s}',
+      '.hf-row .src{font:700 8px/1 "JetBrains Mono",Consolas,monospace;letter-spacing:.04em;flex:0 0 auto}',
+      '.hf-row .verb{font-weight:700;font-size:10.5px;color:#fff;flex:0 0 auto}',
+      '.hf-row .what{font-size:10px;color:#b9bec7;overflow:hidden;text-overflow:ellipsis}',
+      '.hf-row .dur{margin-left:auto;flex:0 0 auto;font:600 8.5px/1 "JetBrains Mono",Consolas,monospace;color:#8d939c}',
+      // 层级：第一行（当前最活跃）全亮，第二行略暗，其余明显压暗 —— 和标题堆叠同一套语言。
+      '.hf-row.lv0{opacity:1}',
+      '.hf-row.lv1{opacity:.62;filter:grayscale(.25)}',
+      '.hf-row.lv2{opacity:.4;filter:grayscale(.55)}',
+      '.hf-empty{font-size:9.5px;color:#8d939c;line-height:1.4;padding-top:2px}',
       '.hf-nowtxt{font-size:16px;font-weight:800;color:#fff;margin:0 0 1px}',
       '.hf-big{font-size:16px;font-weight:800;color:#fff;margin:2px 0}',
       '#hfActs div,#hfWork div,#mChatBody div{font-size:9.5px;line-height:1.45;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:#b9bec7}',
@@ -560,6 +602,160 @@
     }
   }
 
+  /* ---------- multi-harness title stack ----------
+     One floating card per AI platform that is actually working right now.
+     The most recently active one sits in front (large, bright); the rest are pushed
+     behind it — smaller, dimmed, stacked downward-right — so you can see at a glance
+     WHO is driving and WHAT the others are doing.
+     Falls back to the single legacy card when only one platform is active. */
+  const TITLE_STATUS = { tool: '执行中', thinking: '思考中', idle: '空闲' };
+
+  function renderTitleStack(st, sess) {
+    const stack = document.getElementById('chkStack');
+    if (!stack) return;
+    const now = Date.now();
+    // only platforms with real activity in the last 15 min get a card
+    const live = (sess || []).filter(s =>
+      s && (now - (s.lastTime || 0) < 15 * 60 * 1000) && (s.status === 'tool' || s.status === 'thinking' || (s.rate || 0) > 0)
+    );
+    // most recently active first
+    live.sort((a, b) => (b.lastTime || 0) - (a.lastTime || 0));
+
+    // keep DOM nodes stable per source so the CSS transition can animate re-ordering
+    const want = live.slice(0, 3);
+    const seen = new Set();
+    for (const s of want) seen.add(s.source || 'dsh');
+    // drop cards for platforms that went quiet
+    for (const el of Array.from(stack.children)) {
+      if (!seen.has(el.dataset.src)) el.remove();
+    }
+    if (!want.length) {
+      stack.innerHTML = '';
+      return;
+    }
+
+    const geo = (typeof window.__ringAnchor === 'function') ? window.__ringAnchor() : null;
+    // Fall back to a safe anchor when the ring helper is unavailable, and clamp so a
+    // card never drifts off-screen on small / scaled displays (the wallpaper canvas is
+    // 2560×1600 but the visible desktop area can be much smaller after scaling).
+    const vw = window.innerWidth || 1600, vh = window.innerHeight || 900;
+    let baseX = geo ? geo.bx : Math.round(vw * 0.52);
+    let baseY = geo ? geo.by : Math.round(vh * 0.26);
+    const CARD_W = 460, CARD_H = 96;              // generous box incl. scale headroom
+    baseX = Math.max(12, Math.min(baseX, vw - CARD_W));
+    baseY = Math.max(70, Math.min(baseY, vh - CARD_H - 140));
+
+    want.forEach((s, i) => {
+      const src = s.source || 'dsh';
+      let el = stack.querySelector('[data-src="' + src + '"]');
+      if (!el) {
+        el = document.createElement('div');
+        el.className = 'hcard';
+        el.dataset.src = src;
+        el.innerHTML = '<span class="hk"></span><span class="hv"></span>';
+        stack.appendChild(el);
+      }
+      const col = srcColor(src);
+      const hk = el.querySelector('.hk');
+      const hv = el.querySelector('.hv');
+      hk.textContent = SRC_TITLE[src] || String(s.ws || src).toUpperCase();
+      hk.style.color = col;
+      const titleTxt = s.title ? short(s.title, 30) : (s.ws ? String(s.ws) : '(untitled)');
+      const badge = TITLE_STATUS[s.status] || '';
+      hv.innerHTML = esc(titleTxt) + (badge ? '<span class="hbadge" style="color:' + col + '">' + esc(badge) + '</span>' : '');
+
+      // depth: 0 = foreground. The ones behind are offset diagonally so their header
+      // stays readable instead of being buried under the front card.
+      el.className = 'hcard ' + (i === 0 ? 'fg' : i === 1 ? 'bg2' : 'bg3');
+      const dx = i * 54, dy = i * 92;                 // cascade down-right, clear of the front card
+      const sc = i === 0 ? 1 : i === 1 ? 0.80 : 0.66; // shrink the ones behind
+      el.style.zIndex = String(9 - i);
+      el.style.transform = `translate(${Math.round(baseX + dx)}px,${Math.round(baseY + dy)}px) scale(${sc})`;
+    });
+  }
+
+  /* 「现在任务」：多平台并发的竖向循环滚动带。
+     第一行是最活跃的平台（全亮），往下依次压暗，和标题堆叠共享同一套层级语言。
+     内容按签名缓存，避免每次 SSE 推送都重置滚动位置；时长字段单独就地更新。 */
+  let NOW_SIG = '', NOW_HALF = 0, NOW_RAF = 0, NOW_POS = 0, NOW_LAST = 0;
+  const NOW_SPEED = 14; // px/s，慢速流动，不抢注意力
+
+  function nowTick(ts) {
+    const box = $('hfNowScroll'), list = $('hfNowList');
+    if (!box || !list || !NOW_HALF) { NOW_RAF = 0; return; }
+    if (!NOW_LAST) NOW_LAST = ts;
+    const dt = Math.min(0.1, (ts - NOW_LAST) / 1000);
+    NOW_LAST = ts;
+    if (NOW_HALF > box.clientHeight + 2 && !document.hidden) {
+      NOW_POS += NOW_SPEED * dt;
+      if (NOW_POS >= NOW_HALF) NOW_POS -= NOW_HALF;
+      list.style.transform = 'translateY(' + (-NOW_POS).toFixed(2) + 'px)';
+    }
+    NOW_RAF = requestAnimationFrame(nowTick);
+  }
+
+  function renderNowTicker(st, sess) {
+    const box = $('hfNowScroll'), list = $('hfNowList');
+    if (!box || !list) return;
+    const now = Date.now();
+    const live = (sess || [])
+      .filter(s => s && (now - (s.lastTime || 0) < 20 * 60 * 1000))
+      .sort((a, b) => (b.lastTime || 0) - (a.lastTime || 0))
+      .slice(0, 8);
+
+    if (!live.length) {
+      list.innerHTML = '<div class="hf-empty">等你安排任务</div>';
+      NOW_SIG = ''; NOW_HALF = 0; NOW_POS = 0;
+      list.style.transform = '';
+      return;
+    }
+
+    // 时长/速率会随秒变化，绝不能进签名，否则每一帧都会重建 DOM、滚动被打回原点。
+    const heads = live.map((s, i) => {
+      const pend = s.currentTool;
+      let verb, what;
+      if (pend) { verb = humanVerb(pend.name); what = humanObj(pend.name, pend.args) || '执行中…'; }
+      else if (s.status === 'thinking') { verb = '思考中'; what = s.title ? '话题：' + s.title : '整理下一步'; }
+      else if ((s.rate || 0) > 0) { verb = '活跃'; what = s.title || '—'; }
+      else { verb = '空闲'; what = s.title || '—'; }
+      const lv = i === 0 ? 'lv0' : i === 1 ? 'lv1' : 'lv2';
+      return { src: s.source || 'dsh', lv, verb, what, pend, s };
+    });
+    const sig = heads.map(h => h.lv + '|' + h.src + '|' + h.verb + '|' + h.what).join('§');
+
+    if (sig !== NOW_SIG) {
+      NOW_SIG = sig;
+      const rowHtml = (h) =>
+        '<div class="hf-row ' + h.lv + '">' +
+          '<span class="src" style="color:' + srcColor(h.src) + '">' + esc(srcLabel(h.src)) + '</span>' +
+          '<span class="verb">' + esc(h.verb) + '</span>' +
+          '<span class="what">' + esc(h.what) + '</span>' +
+          '<span class="dur" data-dur="1"></span>' +
+        '</div>';
+      const one = heads.map(rowHtml).join('');
+      // 复制一份用于无缝回卷；容器高度由 CSS clamp 控制，一份高度不足时就是静止列表。
+      list.innerHTML = one + one;
+      NOW_POS = 0;
+      NOW_LAST = 0;
+      list.style.transform = 'translateY(0)';
+      // 一份拷贝的真实高度（行高由 CSS 决定，这里量出来，改字号也不会错位）
+      NOW_HALF = list.scrollHeight / 2;
+      if (NOW_HALF > box.clientHeight + 2 && !NOW_RAF) NOW_RAF = requestAnimationFrame(nowTick);
+      if (NOW_HALF <= box.clientHeight + 2 && NOW_RAF) { cancelAnimationFrame(NOW_RAF); NOW_RAF = 0; list.style.transform = ''; }
+    }
+
+    // 就地刷新时长（不重建节点）
+    const durs = list.querySelectorAll('.dur');
+    durs.forEach((el, idx) => {
+      const h = heads[idx % heads.length];
+      if (!h) return;
+      const pend = h.pend;
+      el.textContent = pend && pend.t0
+        ? Math.max(1, Math.round((now - pend.t0) / 1000)) + 's'
+        : ((h.s.rate || 0) > 0 ? Math.round(h.s.rate) + '/分' : '');
+    });
+  }
+
   function renderPanels(st) {
     LAST_STATE = st;
     if (!PANELS_READY) buildPanels();
@@ -581,17 +777,15 @@
       ? { active: dbs.active || 0, rate: dbs.rate || 0, events: dbs.events || 0, title: dbTop ? dbTop.title : '', status: dbTop ? dbTop.status : '' }
       : null;
 
-    // 现在在做什么
-    let icon = '○', verb = '空闲', what = '等你安排任务';
+    // 现在在做什么 —— 不再是单行，而是一条多平台并发的滚动带（见 renderNowTicker）
     const pend = top.currentTool;
-    if (pend) { icon = '▶'; verb = humanVerb(pend.name); what = humanObj(pend.name, pend.args) || '执行中…'; }
-    else if (top.status === 'thinking') { icon = '◐'; verb = '思考中'; what = top.title ? '话题：' + top.title : '整理下一步'; }
-    else if (top.status === 'tool' || (tot.activeTools || 0) > 0) { icon = '▶'; verb = '执行中'; what = '工具运行中'; }
+    let icon = '○';
+    if (pend) icon = '▶';
+    else if (top.status === 'thinking') icon = '◐';
+    else if (top.status === 'tool' || (tot.activeTools || 0) > 0) icon = '▶';
     if ($('hfNowIcon')) $('hfNowIcon').textContent = icon;
     if ($('hfNowIcon')) $('hfNowIcon').style.color = srcIcon(top.source);
-    if ($('hfNowVerb')) $('hfNowVerb').textContent = verb;
-    if ($('hfNowWhat')) $('hfNowWhat').textContent = what;
-    if ($('hfNowDur')) $('hfNowDur').textContent = pend && pend.t0 ? ('已经跑了 ' + Math.max(1, Math.round((Date.now() - pend.t0) / 1000)) + ' 秒') : '';
+    renderNowTicker(st, sess);
 
     // 进度
     if ($('hfProg')) $('hfProg').textContent = '第 ' + (top.turn || 0) + ' 轮 · ' + (top.steps || 0) + ' 步';
@@ -657,6 +851,7 @@
     if (big) big.textContent = (AC >= 0.12 ? '工作中' : '待命') + ' · ' + (st.rate || 0) + ' 事件/分';
     if ($('chkK')) $('chkK').textContent = SRC_TITLE[top.source] || (top.ws ? String(top.ws).toUpperCase() : 'NO ACTIVE SESSION');
     if ($('chkV')) $('chkV').textContent = top.title ? short(top.title, 34) : 'idle — waiting for work';
+    renderTitleStack(st, sess);
     // 圆环数据卡：最近工具调用 + 会话 + 总计
     const ringCards = [];
     for (const f of (st.feed || []).slice(-10).reverse()) {
@@ -1082,6 +1277,20 @@
   const fmtCny = (n) => '¥' + (n || 0).toFixed(4);
   const fmtDur = (ms) => { const m = Math.max(0, Math.round(ms / 60000)); return Math.floor(m / 60) + '时' + String(m % 60).padStart(2, '0') + '分'; };
 
+  /* Currencies differ per harness and must never be summed:
+       DSH      -> CNY (cost-meter ledger, costCny)
+       MiniMax  -> USD (local_runtime_token_usage.cost_usd)
+       WorkBuddy-> credits/points (credit-usage records)
+       Claude   -> USD (not priced here, token counts only)
+     currencyTag() just flags "there are other currencies below" next to the CNY KPI. */
+  function currencyTag(mm, wb, cc) {
+    const has = [];
+    if (mm && (mm.cost || 0) > 0) has.push('$');
+    if (wb && (wb.credit || 0) > 0) has.push('积分');
+    if (cc && (cc.cost || 0) > 0) has.push('$');
+    return has.length ? ' +' + [...new Set(has)].join('/') : '';
+  }
+
   function paintUsage(u) {
     window.__USAGE = u;
     const labels = ['今日 TOKENS', '今日花费', '余额', '缓存命中', '峰谷剩余'];
@@ -1102,7 +1311,10 @@
     const cHit = (cIn + cCr) ? cCr / (cIn + cCr) : 0;
     const vals = [
       fmtTok(allTok),
-      '¥' + (t2.costCny || 0).toFixed(2),
+      // cost is NOT summable across sources: DSH bills CNY, MiniMax bills USD, WorkBuddy
+      // bills credits. The KPI therefore shows the DSH ledger only and the per-source
+      // lines below carry their own currency so nothing is silently added together.
+      '¥' + (t2.costCny || 0).toFixed(2) + (currencyTag(mm, wb, cc)),
       u.balance != null ? '¥' + u.balance.toFixed(2) : '—',
       (cHit * 100).toFixed(1) + '%',
       fmtDur(p.remainMs || 0)
@@ -1118,20 +1330,25 @@
     ];
     segs.forEach((el, i) => { el.style.width = Math.max(2, Math.round(widths[i] || 2)) + '%'; });
 
-    const el = document.getElementById('hfUse');
+      const el = document.getElementById('hfUse');
     if (el) {
       const rows = [];
       if (s) rows.push('<div>本会话 <b>¥' + s.costCny.toFixed(4) + '</b> · 命中 ' + (s.hit * 100).toFixed(1) + '%</div>');
-      rows.push('<div><b>DSH</b> 今日 ' + fmtTok(dshTok) + ' tok · ¥' + (t2.costCny || 0).toFixed(2) + '</div>');
-      // one line per harness, but only for the ones that actually spent tokens today
+      rows.push('<div><b>DSH</b> 今日 ' + fmtTok(dshTok) + ' tok · <b>¥' + (t2.costCny || 0).toFixed(2) + '</b></div>');
+      // one line per harness. Each carries its OWN currency because DSH/MiniMax/WorkBuddy
+      // bill in different units and adding them would produce a meaningless number.
       const srcs = [
-        { k: 'MM', d: mm, tok: mmTok, c: '#ba8cff' },
-        { k: 'WB', d: wb, tok: wbTok, c: '#0ec7a8' },
-        { k: 'CC', d: cc, tok: ccTok, c: '#d6a06e' },
+        { k: 'MM', d: mm, tok: mmTok, c: '#ba8cff', unit: 'usd' },
+        { k: 'WB', d: wb, tok: wbTok, c: '#0ec7a8', unit: 'credit' },
+        { k: 'CC', d: cc, tok: ccTok, c: '#d6a06e', unit: 'usd' },
       ];
       for (const x of srcs) {
         if (!x.d || !x.tok) continue;
-        rows.push('<div style="color:' + x.c + '"><b>' + x.k + '</b> 今日 ' + fmtTok(x.tok) + ' tok · 命中 ' + ((x.d.hit || 0) * 100).toFixed(1) + '%</div>');
+        let money = '';
+        if (x.unit === 'usd' && (x.d.cost || 0) > 0) money = ' · <b>$' + Number(x.d.cost).toFixed(3) + '</b>';
+        if (x.unit === 'credit' && (x.d.credit || 0) > 0) money = ' · <b>' + Number(x.d.credit).toFixed(1) + ' 积分</b>';
+        rows.push('<div style="color:' + x.c + '"><b>' + x.k + '</b> 今日 ' + fmtTok(x.tok) + ' tok · 命中 ' +
+          ((x.d.hit || 0) * 100).toFixed(1) + '%' + money + '</div>');
       }
       rows.push('<div>合计 <b>' + fmtTok(allTok) + ' tok</b>' + (u.balance != null ? ' · 余额 <b>¥' + u.balance.toFixed(2) + '</b>' : '') + '</div>');
       if (p.nextLabel) rows.push('<div>' + (p.inPeak ? '峰时' : '平价') + '剩余 <b>' + fmtDur(p.remainMs || 0) + '</b> · ' + p.nextLabel + ' 转' + (p.inPeak ? '平价' : '峰时') + '</div>');
