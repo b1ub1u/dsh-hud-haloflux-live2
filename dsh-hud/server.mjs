@@ -37,11 +37,11 @@ const MIME = {
 };
 
 /* ---------------- workspace name decode ---------------- */
-/* The DSH session dir encodes an absolute path ("--D-56587-Documents-...--"), but the
+/* The DSH session dir encodes an absolute path ("--C-Users-me-Documents-...--"), but the
    encoding is LOSSY: the same "-" is used for a path separator AND for hyphens that are
    part of folder names ("deepseek-harness" -> "deepseek-harness", "default-workspace" ->
    "default-workspace"). Rebuilding a path from it is therefore guesswork, which is how
-   the HUD used to display "D\56587\Documents\deepseek\harness\default\workspace" instead
+   the HUD used to display "D\\Users\\me\\Documents\\deepseek\\harness\\default\\workspace" instead
    of "default-workspace".
    We now return the raw token only as a placeholder; onEvent() replaces it with the
    trailing segment of the REAL cwd that the session's first record carries. */
@@ -815,55 +815,56 @@ setInterval(tick, POLL_MS);
 /* 看门狗：壁纸页面掉线时自动恢复
    第 1 步：3 分钟无页面连接 -> reload 壁纸
    第 2 步：再 2 分钟还是没连上 -> 重启 Lively（WebView 冻死时 reload 不一定救得回来） */
-/* Wallpaper watchdog — CONSERVATIVE MODE.
-   The old version looped forever: "no client for 3 min -> setwp reload", "still none
-   after 2 min -> taskkill Lively + relaunch". When the wallpaper merely wasn't
-   connected yet (service restarted, Lively still booting), it kept rewriting the
-   Lively layout, which replaced dshhaloflux.001 with other wallpapers and left the
-   desktop with no HUD at all. It could also fight a legitimately different wallpaper.
-   New policy:
-     - Lively not running  -> do nothing (user may have closed it on purpose)
-     - one reload attempt  -> then STOP re-reloading and just log
-     - never taskkill Lively automatically
-     - any client connect  -> reset the counter and arm one fresh attempt */
-const LIVELY_EXE = 'C:\\Program Files\\Lively Wallpaper\\Lively.exe';
-const WD_IDLE_MS = 180000;       // 3 min without a wallpaper client before acting
-const WD_MAX_RELOADS = 1;        // one automatic reload per outage, then stay quiet
-let wdPhase = 0;
-let wdReloadsThisOutage = 0;
+/* Wallpaper watchdog — OBSERVE ONLY (2026-11-06).
+   ---------------------------------------------------------------------------
+   WHY THIS NO LONGER TOUCHES LIVELY (measured, not guessed):
+   'setwp --file reload' is not a soft refresh. Lively logs the exact chain in
+   the same millisecond:
+       Cleared watchdog program(s)  ->  Setting wallpaper: <html>  ->  Wv<N>: Process exited with exit code: -1
+   i.e. reload tear-detaches the current WebView2 player and builds a fresh one
+   (Wv20 -> Wv27 within 37 min on this machine). Every detached player leaks a
+   GPU process that keeps its committed memory but reports Handles=2, and those
+   leaked processes CANNOT be killed by Stop-Process / taskkill / WMI — only a
+   reboot reclaims them (~2-3.5 GB each). Accumulating those drove commit charge
+   to 47.9/49 GB and produced msedgewebview2 0xE0000008 (OOM).
 
+   So every automatic reload was manufacturing the very OOM it meant to fix.
+   Two other observers (dsh-hud/watch-lively.vbs and recover-wallpaper.cmd) fired
+   on the same symptoms, which is what turned a single stuck page into a loop.
+
+   New policy — log only, never mutate:
+     - never call 'setwp --file reload' automatically
+     - never taskkill Lively
+     - still sample state so a human can see WHY the page went quiet
+   Recovery is an explicit user action: run dsh-hud/recover-wallpaper.cmd.
+   --------------------------------------------------------------------------- */
+const LIVELY_EXE = 'C:\\Program Files\\Lively Wallpaper\\Lively.exe';
+const WD_IDLE_MS = 180000;       // 3 min without a wallpaper client before reporting
+let wdPhase = 0;
+
+/* Observe-only watchdog. It reports an outage once and then stays silent until the
+   page comes back. It never reloads the wallpaper: reloading is what leaks players. */
 setInterval(() => {
   const pageFresh = Date.now() - lastPagePollAt < 180000;
   if (clients.size > 0 && pageFresh) {
-    // healthy again: re-arm exactly one automatic reload for the next outage
+    // healthy again: clear the latch so a future outage is reported once more
     lastClientAt = Date.now();
     wdPhase = 0;
-    wdReloadsThisOutage = 0;
     return;
   }
   const idle = Date.now() - lastClientAt;
   if (idle < WD_IDLE_MS) return;
+  if (wdPhase !== 0) return;   // already reported this outage; stay quiet, never act
 
-  // Lively is not running: silently give up. Relaunching it is the user's call.
+  wdPhase = 1;
   let livelyUp = false;
   try { livelyUp = !!GetLivelyRunning(); } catch (e) { livelyUp = false; }
+  const mins = Math.round(idle / 60000);
   if (!livelyUp) {
-    if (wdPhase !== 2) { wdPhase = 2; console.log('[watchdog] no client and Lively is not running -> idle (not relaunching)'); }
+    console.log('[watchdog] wallpaper page silent ' + mins + 'min and Lively is not running — NOT acting (start it, then run dsh-hud/recover-wallpaper.cmd)');
     return;
   }
-
-  if (wdReloadsThisOutage >= WD_MAX_RELOADS) {
-    if (wdPhase !== 2) { wdPhase = 2; console.log('[watchdog] still no client after the single reload -> giving up (manual fix needed)'); }
-    return;
-  }
-
-  // one (and only one) reload attempt
-  wdReloadsThisOutage += 1;
-  wdPhase = 1;
-  lastClientAt = Date.now();
-  lastPagePollAt = Date.now();
-  try { execFile(LIVELY_EXE, ['setwp', '--file', 'reload'], { windowsHide: true, timeout: 20000 }, () => {}); } catch (e) {}
-  console.log('[watchdog] no wallpaper client for 3min -> single reload attempt (no taskkill)');
+  console.log('[watchdog] wallpaper page silent ' + mins + 'min — NOT reloading automatically (a reload leaks one WebView2 player ~2-3.5 GB, and those cannot be killed without a reboot); run dsh-hud/recover-wallpaper.cmd if it stays blank');
 }, 60000);
 
 /* Is Lively running? Use tasklist (cheap, no window) instead of reloading blindly. */
