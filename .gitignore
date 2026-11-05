@@ -4,6 +4,7 @@ dsh-hud/.external.json
 dsh-hud/.media.json
 dsh-hud/server.log
 dsh-hud/wallpaper-screen.log
+dsh-hud/lively-watch.log
 *.bak
 
 # 依赖与缓存
