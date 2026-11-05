@@ -50,8 +50,30 @@ function Log($msg) {
   if (-not $Quiet) { Write-Host $line }
 }
 
-$exe = 'C:\Program Files\Lively Wallpaper\Lively.exe'
-if (-not (Test-Path $exe)) { Log 'Lively 未安装，跳过'; exit 0 }
+function Resolve-LivelyExe {
+  # Resolve Lively from env / usual install dirs / registry instead of one hard-coded path.
+  if ($env:HALOFLUX_LIVELY_EXE -and (Test-Path $env:HALOFLUX_LIVELY_EXE)) { return $env:HALOFLUX_LIVELY_EXE }
+  $c = @(
+    (Join-Path $env:ProgramFiles 'Lively Wallpaper\Lively.exe'),
+    (Join-Path $env:ProgramW6432 'Lively Wallpaper\Lively.exe'),
+    (Join-Path $env:LOCALAPPDATA 'Programs\Lively Wallpaper\Lively.exe'),
+    'C:\Program Files\Lively Wallpaper\Lively.exe',
+    'C:\Program Files (x86)\Lively Wallpaper\Lively.exe'
+  )
+  foreach ($p in $c) { if ($p -and (Test-Path $p)) { return $p } }
+  foreach ($root in @('HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall','HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall','HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall')) {
+    foreach ($k in (Get-ChildItem $root -ErrorAction SilentlyContinue)) {
+      $v = Get-ItemProperty $k.PSPath -ErrorAction SilentlyContinue
+      if ($v.DisplayName -like '*Lively*' -and $v.InstallLocation) {
+        $e = Join-Path $v.InstallLocation 'Lively.exe'
+        if (Test-Path $e) { return $e }
+      }
+    }
+  }
+  return $null
+}
+$exe = Resolve-LivelyExe
+if (-not $exe) { Log 'Lively 未安装，跳过'; exit 0 }
 
 $deadline = (Get-Date).AddSeconds($WaitLively)
 while (-not (Get-Process Lively -ErrorAction SilentlyContinue)) {
@@ -131,10 +153,12 @@ if (-not $target) { Log '未找到可用的目标屏'; exit 0 }
 
 Log ("目标屏 = {0} (Lively monitor {1}, adapter={2})" -f $target.Device, $target.Index, $target.Adapter)
 
-# ---- 应用：只在目标屏设置，其它屏清掉 ----
+# ---- 应用：先全清（含 isStale 失活屏残留），再只在目标屏重建 ----
+# 旧逻辑按 Index 逐个 closewp，但失活屏记录的 Index 常与目标屏相同（都是 1），
+# 于是 if ($s.Index -ne $target.Index) 永远为假，stale 条目一次也清不掉 ——
+# 切屏/拔屏后残留条目会让桌面黑屏。改成全清 + 重建，顺带规避编号漂移。
+& $exe closewp --monitor -1 2>&1 | Out-Null
+Start-Sleep -Seconds 1
 & $exe setwp --file $Library --monitor $target.Index 2>&1 | Out-Null
 Start-Sleep -Seconds 1
-foreach ($s in @(Get-Screens)) {
-  if ($s.Index -ne $target.Index) { & $exe closewp --monitor $s.Index 2>&1 | Out-Null }
-}
-Log '壁纸屏幕已更新'
+Log '壁纸屏幕已更新（已清理失活屏残留）'

@@ -73,7 +73,29 @@ if (Test-Path $dshHome) {
 }
 
 # ---------------------------------------------------------------- 2. Lively
-$LIVELY_EXE = 'C:\Program Files\Lively Wallpaper\Lively.exe'
+function Resolve-LivelyExe {
+  # Resolve Lively from env / usual install dirs / registry instead of one hard-coded path.
+  if ($env:HALOFLUX_LIVELY_EXE -and (Test-Path $env:HALOFLUX_LIVELY_EXE)) { return $env:HALOFLUX_LIVELY_EXE }
+  $c = @(
+    (Join-Path $env:ProgramFiles 'Lively Wallpaper\Lively.exe'),
+    (Join-Path $env:ProgramW6432 'Lively Wallpaper\Lively.exe'),
+    (Join-Path $env:LOCALAPPDATA 'Programs\Lively Wallpaper\Lively.exe'),
+    'C:\Program Files\Lively Wallpaper\Lively.exe',
+    'C:\Program Files (x86)\Lively Wallpaper\Lively.exe'
+  )
+  foreach ($p in $c) { if ($p -and (Test-Path $p)) { return $p } }
+  foreach ($root in @('HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall','HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall','HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall')) {
+    foreach ($k in (Get-ChildItem $root -ErrorAction SilentlyContinue)) {
+      $v = Get-ItemProperty $k.PSPath -ErrorAction SilentlyContinue
+      if ($v.DisplayName -like '*Lively*' -and $v.InstallLocation) {
+        $e = Join-Path $v.InstallLocation 'Lively.exe'
+        if (Test-Path $e) { return $e }
+      }
+    }
+  }
+  return $null
+}
+$LIVELY_EXE = Resolve-LivelyExe
 $LIVELY_LIB = Join-Path $env:LOCALAPPDATA 'Lively Wallpaper\Library\wallpapers\dshhaloflux.001'
 
 if (-not $SkipLively) {
@@ -190,7 +212,7 @@ Write-Host "  预览地址： http://127.0.0.1:$Port/" -ForegroundColor White
 Write-Host "  健康检查： http://127.0.0.1:$Port/stats" -ForegroundColor Gray
 Write-Host ''
 Write-Host '  常用操作：' -ForegroundColor Cyan
-Write-Host '    重载壁纸    & "C:\Program Files\Lively Wallpaper\Lively.exe" setwp --file reload'
+Write-Host "    重载壁纸    & `"$LIVELY_EXE`" setwp --file reload"
 Write-Host '    重新选屏    powershell -File dsh-hud\fix-wallpaper-screen.ps1'
 Write-Host '    重启后自检  powershell -File dsh-hud\verify-after-reboot.ps1'
 Write-Host '    完全卸载    powershell -File dsh-hud\install.ps1 -Uninstall'

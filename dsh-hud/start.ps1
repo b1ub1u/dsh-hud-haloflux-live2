@@ -1,4 +1,4 @@
-# DSH × HALOFLUX live monitor — start the local data bridge (with supervisor)
+﻿# DSH × HALOFLUX live monitor — start the local data bridge (with supervisor)
 # usage:  powershell -File dsh-hud/start.ps1 [-Port 7788]
 param([int]$Port = 7788)
 $ErrorActionPreference = 'Stop'

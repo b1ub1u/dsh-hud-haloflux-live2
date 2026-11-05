@@ -34,7 +34,29 @@ if ($conn) {
 
 # 2. 撤壁纸 + 删库
 Step '撤掉桌面壁纸'
-$exe = 'C:\Program Files\Lively Wallpaper\Lively.exe'
+function Resolve-LivelyExe {
+  # Resolve Lively from env / usual install dirs / registry instead of one hard-coded path.
+  if ($env:HALOFLUX_LIVELY_EXE -and (Test-Path $env:HALOFLUX_LIVELY_EXE)) { return $env:HALOFLUX_LIVELY_EXE }
+  $c = @(
+    (Join-Path $env:ProgramFiles 'Lively Wallpaper\Lively.exe'),
+    (Join-Path $env:ProgramW6432 'Lively Wallpaper\Lively.exe'),
+    (Join-Path $env:LOCALAPPDATA 'Programs\Lively Wallpaper\Lively.exe'),
+    'C:\Program Files\Lively Wallpaper\Lively.exe',
+    'C:\Program Files (x86)\Lively Wallpaper\Lively.exe'
+  )
+  foreach ($p in $c) { if ($p -and (Test-Path $p)) { return $p } }
+  foreach ($root in @('HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall','HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall','HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall')) {
+    foreach ($k in (Get-ChildItem $root -ErrorAction SilentlyContinue)) {
+      $v = Get-ItemProperty $k.PSPath -ErrorAction SilentlyContinue
+      if ($v.DisplayName -like '*Lively*' -and $v.InstallLocation) {
+        $e = Join-Path $v.InstallLocation 'Lively.exe'
+        if (Test-Path $e) { return $e }
+      }
+    }
+  }
+  return $null
+}
+$exe = Resolve-LivelyExe
 $lib = Join-Path $env:LOCALAPPDATA 'Lively Wallpaper\Library\wallpapers\dshhaloflux.001'
 if (Test-Path $exe) {
   # 从所有屏幕撤掉

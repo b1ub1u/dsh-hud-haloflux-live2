@@ -422,7 +422,7 @@
   /* ---------- privacy scrub for on-screen text ----------
      The wallpaper is visible to anyone who glances at the desktop (and to anyone you
      share a screenshot with), so absolute paths must never be rendered verbatim:
-     "D:\\56587\\Documents\\deepseek-harness\\default-workspace\\dsh-hud\\bridge.js"
+     "C:\\Users\\<user>\\Documents\\project\\dsh-hud\\bridge.js"
      leaks the user name and the project layout. We keep the last two segments, which
      is all the HUD actually needs, and drop the drive + home prefix.
      This runs BEFORE truncation so the useful tail survives. */
@@ -570,7 +570,7 @@
   function canvasCtx(id) {
     const c = document.getElementById(id);
     if (!c) return null;
-    const dpr = 2.5;   // fixed supersampling: the wallpaper forces devicePixelRatio 0.65
+    const dpr = 1.5;   // reduced supersampling (was 2.5) to ease WebView2 GPU pressure
     const w = Math.max(10, c.clientWidth), h = Math.max(10, c.clientHeight);
     if (c.width !== Math.round(w * dpr) || c.height !== Math.round(h * dpr)) {
       c.width = Math.round(w * dpr); c.height = Math.round(h * dpr);
@@ -987,10 +987,11 @@
      a clock that runs at 10% speed: the disc keeps its slow idle drift, the "breathing"
      layers settle, and everything still fades out because dt stays > 0.
      At full activity the clock runs at real time again. */
-  /* wallpaper mode: force DPR 1 ??a 4K screen at DPR2 allocates 7680?4320 buffers (??30 MB each) */
+  /* wallpaper mode: clamp DPR to 2 (a 4K screen at DPR2 allocates 7680x4320 buffers, ~130 MB each).
+     Lower it to 1 by editing nativeDPR below if WebView2 runs out of memory on 4K + high scaling. */
   if (WALL) {
     try {
-      const nativeDPR = Math.min(window.devicePixelRatio || 1, 2); // use the real display DPR (1.5 on 150% scaling) so canvas renders 1:1 with physical pixels - kills moire
+      const nativeDPR = Math.min(window.devicePixelRatio || 1, 2); // 1.5 on 150% display; crash root cause was virtual display, now handled there
       Object.defineProperty(window, 'devicePixelRatio', { get: () => nativeDPR, configurable: true });
       setTimeout(() => { try { resizeAll(); } catch (e) {} }, 400);
       setTimeout(() => {   // report the real devicePixelRatio + canvas size + layout metrics
