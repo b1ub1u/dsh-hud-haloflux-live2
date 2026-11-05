@@ -82,6 +82,50 @@ powershell -NoProfile -ExecutionPolicy Bypass -File dsh-hud\install.ps1
 **前置条件**：Windows 10/11 x64 + [DeepSeek Harness](https://github.com/Ryder191/haloflux)。
 Node.js 与 Lively 缺了会自动装。详见 [INSTALL.md](INSTALL.md)。
 
+## 丢画面？快速找回
+
+切屏 / 插拔显示器 / 系统睡眠唤醒后，偶发壁纸「没了」——本质是 Lively 把壁纸画到了
+失活的屏上，或 WebView 被暂停。不用重装，一键拉起：
+
+```powershell
+# 双击也行：dsh-hud\recover-wallpaper.cmd
+dsh-hud\recover-wallpaper.cmd        # 重载 + 重新选屏 + 打开浏览器预览
+dsh-hud\recover-wallpaper.cmd /silent  # 开机静默版：不弹浏览器、不暂停
+```
+
+脚本会依次：① 检查 7788 数据服务；② **检查 Lively 宿主进程，没跑就自动启动并等待就绪**（起不来就退出，不空转）；
+③ `setwp --file reload` 强制重载（重注入 bridge.js）；④ 跑 `fix-wallpaper-screen.ps1`
+重新选屏 + 对齐任务栏；⑤ 顺手跑 `clean-orphan-webviews.ps1` 回收本次 reload 泄漏的播放器；⑥（交互模式）开浏览器预览。
+
+Lively 位置不写死：优先 `HALOFLUX_LIVELY_EXE` 环境变量，其次常见安装目录，再查注册表卸载项。
+
+> 实测坑点：退出 DSH 时偶尔会连 **Lively 宿主进程**一起带走（此时 7788 服务仍活着、
+> 壁纸布局也还在，只是没人在画）。所以恢复脚本必须先确保 Lively 在跑，光 reload 是修不好的。
+>
+> ⚠️ **reload 是有代价的**：它会把播放器撕掉重建，泄漏一个杀不掉的 GPU 进程（2~3.5 GB）。
+> 所以除这个脚本外，**没有任何地方会自动 reload**——别把它挂进定时任务。
+
+已注册**登录自启**：`recover-wallpaper-startup.vbs` 在 `shell:startup` 里以 `/silent` 运行，
+重启后自动重载 + 重新选屏，覆盖多屏重连导致的丢画面，且不弹浏览器。
+
+**Lively 壁纸观察者（只记录，不自动恢复）**：`watch-lively.vbs`（v3）每 60 秒检查三类信号，
+命中只写日志、**绝不自动恢复**：
+① `Lively.exe` 进程没了；② `WallpaperLayout.json` 内容变了（插拔/切换显示器）；
+③ `/stats` 连续 3 轮 `clients:0`（壁纸页没连上 SSE）。
+事件写 `dsh-hud/lively-watch.log`（超 64 KB 轮转）。`watch-lively-startup.vbs` 在
+`shell:startup` 里负责登录时拉起。
+
+> **⚠️ 为什么不再自动恢复（2026-11-06 本机实测）**：每次 `setwp --file reload` 都不是软刷新，而是把
+> 当前 WebView2 播放器**撕掉重建**（Lively 日志三行连发：`Cleared watchdog` → `Setting wallpaper` →
+> `Wv<N>: Process exited with exit code: -1`）。被撕掉的播放器留下一个 GPU 子进程，攥着
+> 2~3.5 GB 提交内存，`Handles=2`，**Stop-Process / taskkill / WMI 全杀不掉，只有重启能回收**。
+> 本机实测 37 分钟内这样重建了 7 次（Wv20→Wv27），提交内存顶到 47.9/49 GB，
+> 最后 `msedgewebview2` 以 `0xE0000008`（OOM）崩溃。**自动恢复在制造它想修的故障。**
+> 所以恢复现在只有人工入口：双击 `recover-wallpaper.cmd`。
+> 改完守护脚本**需重新登录或重启守护**才生效（VBS 是一次性解释执行）。
+想立刻生效：双击 `dsh-hud/watch-lively.vbs`；停用：删掉 Startup 里的
+`watch-lively-startup.vbs` 并结束对应的 `wscript.exe` 进程。
+
 ## 卸载
 
 ```powershell
@@ -101,6 +145,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File dsh-hud\install.ps1 -Uninsta
 | `dsh-hud/external.ps1` | 外部 AI 状态（UI Automation，五家通用探测） |
 | `dsh-hud/media.ps1` | 系统媒体会话读写（上下曲/播放暂停） |
 | `dsh-hud/fix-wallpaper-screen.ps1` | 自动选屏 + 任务栏安全边距 |
+| `dsh-hud/recover-wallpaper.cmd` | 丢画面快速恢复（重载壁纸 + 重新选屏 + 预览，`/silent` 供开机静默） |
+| `dsh-hud/watch-lively.vbs` | Lively 宿主观察者（v3，只记录不自动恢复）：每 60 秒探活，事件写 `lively-watch.log` |
 | `dsh-hud/screenshot.mjs` | Edge headless + CDP 高端截图工具 |
 | `dsh-hud/wall-proj/` | Lively / Wallpaper Engine 壁纸工程 |
 | `dsh-hud/install.ps1` | **一键安装**（依赖 + 壁纸 + 自启 + 服务 + 选屏） |
@@ -161,9 +207,12 @@ Lively Wallpaper（WebView2）→ 桌面壁纸
 | 现象 | 处理 |
 |---|---|
 | 壁纸黑屏 / 显示"等待 dsh-hud 服务" | 排查 `dsh-hud/start.ps1`；端口被占会直接退出 |
-| 退出 DSH 后壁纸消失 | 用开机自启启动，别从 DSH 会话里手动起服务 |
-| 壁纸跑到别的显示器 | 跑 `fix-wallpaper-screen.ps1` 重新选屏 |
+| 退出 DSH 后壁纸消失 | 通常是 **Lively 宿主进程**被带走（7788 服务仍活着）；双击 `recover-wallpaper.cmd`，它会自动重启 Lively + 重载 + 重新选屏 |
+| 壁纸跑到别的显示器 | 跑 `fix-wallpaper-screen.ps1` 或双击 `recover-wallpaper.cmd` 重新选屏 |
+| 切屏 / 插拔显示器后整个画面没了 | 双击 `dsh-hud/recover-wallpaper.cmd`（重载 + 重新选屏 + 开预览）；观察者会把现场写进 `lively-watch.log`，但不会自动恢复 |
+| `WallpaperLayout.json` 里有 `isStale:true` 的失活屏记录 | Lively 为"显示器重新插回"保留的正常配置；真问题是旧选屏脚本按 `Index` 清理，而失活屏与目标屏 Index 都是 1 → 永远清不掉。已改为 `closewp -1` 全清 + `setwp` 重建 |
 | 底部面板被任务栏遮住 | 安全边距自动测量；异常时重载壁纸 |
+| 内存/提交内存持续上涨直到崩（0xE0000008 OOM） | 每次 `setwp --file reload` 会遗弃一个杀不掉的 WebView2 GPU 进程（2~3.5 GB/次）；不要自动 reload，手动恢复后跑 `clean-orphan-webviews.ps1`，必要时重启回收 |
 | 画面卡顿 | 调低 `LOAD`、帧预算或 `quality` |
 | 中文显示成方块 | 装 MiSans 字体，或改 `bridge.js` 字体栈 |
 | 没有声音 | 正常：壁纸自带 BGM 已硬静音；播放器面板控制的是系统音乐软件 |

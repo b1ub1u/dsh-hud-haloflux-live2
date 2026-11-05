@@ -53,6 +53,10 @@ Lively Wallpaper（WebView2）→ 桌面壁纸 / 侧栏预览
 | `start.ps1` | 启动服务（前台） |
 | `start-hidden.vbs` | 无窗口启动（供自启使用） |
 | `verify-after-reboot.ps1` | 重启后一键自检 |
+| `recover-wallpaper.cmd` | 丢画面快速恢复（重载壁纸 + 重新选屏 + 预览；`/silent` 供开机静默） |
+| `recover-wallpaper-startup.vbs` | 登录自启：以 `/silent` 跑上面的 cmd，登录时重载一次 + 重新选屏 |
+| `watch-lively.vbs` | Lively 宿主观察者（v3）：每 60 秒探活，命中只写 `lively-watch.log`，不自动恢复 |
+| `watch-lively-startup.vbs` | 登录自启：拉起上面的常驻守护 |
 | `wall-proj/` | Lively 壁纸工程（`LivelyInfo.json` + `index.html` 包装页，带服务断线重试） |
 | `screenshot.mjs` / `shot-idle.mjs` | 通过 CDP 给页面截图（开发用） |
 
@@ -91,6 +95,36 @@ http://127.0.0.1:7788/wall      # 壁纸模式（同样的完整画面）
 
 > 注意：如果在 DSH 会话里手动启动服务，它会是 DSH 的子进程，**退出 DSH 时会被一起杀掉**。
 > 正常路径依赖登录自启即可。
+
+另在登录自启目录放了 `recover-wallpaper-startup.vbs`，以 `/silent` 运行
+`recover-wallpaper.cmd`：登录后自动 `setwp --file reload` + 重新选屏 + 对齐任务栏，
+覆盖「多屏重连 / 切屏丢画面」的自动恢复，**不弹浏览器**。手动补救时双击
+`recover-wallpaper.cmd` 即可（交互模式会额外开一个 `http://127.0.0.1:7788/` 预览窗口）。
+
+恢复脚本还会**先检查 Lively 宿主进程**：没跑就自动启动并等待就绪，再 reload。
+实测退出 DSH 时偶尔会把 Lively 一起带走（此时 7788 服务仍在、壁纸布局也还在，
+只是没进程在画），光 `setwp --file reload` 修不好——必须先拉起宿主。
+
+另挂了一个常驻观察者 `watch-lively.vbs`（v3，**只记录不自动恢复**），由 `watch-lively-startup.vbs`（登录自启目录）拉起。
+每 60 秒检查三个信号，命中只写日志、**绝不自动执行恢复**：
+
+| 信号 | 覆盖的故障 |
+|---|---|
+| `Lively.exe` 进程消失（WMI） | 退出 DSH / 宿主崩溃 |
+| `WallpaperLayout.json` 内容变化 | 插拔显示器、切屏、编号漂移 |
+| `/stats` 连续 3 轮 `clients:0` | Lively 活着但 WebView 没在画（黑屏） |
+
+`clients` 用 `MSXML2.XMLHTTP` 探 `/stats` 正则提取；探测失败返回 -1 视为健康，不误触发。
+有单实例互斥，WMI 失败时保守视为存活。事件写 `lively-watch.log`（>64 KB 轮转）。
+
+> **为什么 v2 的自动恢复被撤掉（2026-11-06 实测）**：每一次 `setwp --file reload` 都不是"软刷新"，
+> 而是把当前 WebView2 播放器**撕掉重建**（Lively 日志里 `Cleared watchdog` → `Setting wallpaper` →
+> `Wv<N>: Process exited with exit code: -1` 三行连发）。被撕掉的那个播放器会留下一个 GPU 子进程，
+> 保持 2~3.5 GB 提交内存，且 `Handles=2`、`Stop-Process`/`taskkill`/WMI **全部杀不掉**，只有重启回收。
+> 实测本机 37 分钟内靠这个机制重建了 7 次（Wv20→Wv27），把提交内存顶到 47.9/49 GB，
+> 最终 `msedgewebview2` 以 `0xE0000008`（OOM）崩掉。**守护本身在制造它想防的 OOM。**
+> 所以现在只有人能触发 reload（`recover-wallpaper.cmd`），脚本只负责记录现场。
+> VBS 一次性解释执行，改完脚本需重新登录或重启守护才生效。
 
 ---
 
